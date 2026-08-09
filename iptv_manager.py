@@ -832,11 +832,34 @@ class IPTVManager:
 
 
 if __name__ == "__main__":
-    try:
-        manager = IPTVManager()
-        asyncio.run(manager.run_forever())
-    except KeyboardInterrupt:
-        logger.info("Остановка пользователем")
-    except Exception as e:
-        logger.critical(f"Fatal: {e}")
-        sys.exit(1)
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true",
+                        help="Один цикл и выход")
+    args = parser.parse_args()
+    
+    manager = IPTVManager()
+    
+    if args.once:
+        # Режим для GitHub: один цикл и выход
+        async def run_once():
+            await manager.load_reference()
+            await manager.update_cycle()
+            manager.validator.shutdown()
+            manager.cache.close()
+        
+        try:
+            asyncio.run(run_once())
+        except Exception as e:
+            logger.critical(f"Fatal: {e}")
+            sys.exit(1)
+    else:
+        # Обычный режим: бесконечный цикл
+        try:
+            asyncio.run(manager.run_forever())
+        except KeyboardInterrupt:
+            logger.info("Остановка пользователем")
+        except Exception as e:
+            logger.critical(f"Fatal: {e}")
+            sys.exit(1)
