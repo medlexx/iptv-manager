@@ -24,12 +24,18 @@ sources:
   #
   # - name: "remote_source_1"
   #   type: "remote"
-  #   url: "https://example.com/playlist.m3u"
+  #   url: "http://78.153.139.136:8090/playlists/mirovoy_iptv.m3u"
   #   priority: 100
   #   enabled: true
 
   # - name: "remote_source_2"
   #   type: "remote"
-  #   url: "https://example.com/playlist2.m3u8"
+  #   url: "https://loganettv.github.io/playlists/all.m3u"
   #   priority: 80
+  #   enabled: true
+  
+  # - name: "remote_source_1"
+  #   type: "remote"
+  #   url: "https://homtv.ru/8124907.m3u"
+  #   priority: 100
   #   enabled: true
