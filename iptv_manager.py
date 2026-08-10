@@ -13,31 +13,12 @@ IPTV Manager — production version for GitHub Action.
 - источники берутся из папки sources/ и sources.yaml;
 - разные названия одного канала сопоставляются через нормализацию,
   aliases.yaml и консервативный fuzzy matching;
-- для каждого обязательного канала выбирается рабочая ссылка;
+- для каждого обязательного канала проверяется максимум 5 лучших ссылок;
+- при нахождении первой рабочей ссылки проверка канала завершается;
 - SQLite хранит результаты проверок и последнюю рабочую ссылку;
-- повреждённый validation_cache.db автоматически переименовывается
-  и создаётся заново;
 - новый плейлист НЕ заменяет старый, если хотя бы один обязательный
-  канал не найден с рабочей ссылкой;
+  канал не найден с рабочей ссылкой (при strict_reference: True);
 - порядок каналов сохраняется таким же, как в spisok.txt.
-
-Рекомендуемая структура:
-  iptv-manager/
-    iptv_manager.py
-    config.yaml
-    sources.yaml
-    aliases.yaml
-    spisok.txt
-    sources/
-      *.m3u
-      *.m3u8
-      *.txt
-    data/
-      validation_cache.db
-    playlist/
-      eternal_playlist.m3u8
-    reports/
-      status.txt
 """
 
 from __future__ import annotations
@@ -75,10 +56,11 @@ DEFAULT_CONFIG = {
     "report_file": "reports/status.txt",
 
     "fuzzy_threshold": 0.82,
+    "max_candidates_per_channel": 5,
 
-    "http_timeout": 12,
-    "connect_timeout": 8,
-    "read_timeout": 10,
+    "http_timeout": 10,
+    "connect_timeout": 5,
+    "read_timeout": 5,
 
     "max_concurrent_validation": 40,
     "max_concurrent_downloads": 8,
@@ -109,8 +91,10 @@ logging.basicConfig(
 logger = logging.getLogger("iptv_manager")
 
 
-def resolve_path(value: str) -> Path:
-    path = Path(value)
+def resolve_path(value) -> Path:
+    if isinstance(value, dict):
+        value = value.get("path", "")
+    path = Path(str(value))
     return path if path.is_absolute() else ROOT_DIR / path
 
 
@@ -969,6 +953,7 @@ class Candidate:
 def build_candidates(
     entries: Sequence[SourceEntry],
     matcher: ChannelMatcher,
+    max_per_channel: int = 5,
 ) -> Dict[str, List[Candidate]]:
     result: Dict[str, List[Candidate]] = {}
     unmatched = 0
@@ -1004,11 +989,13 @@ def build_candidates(
             ):
                 unique[candidate.url] = candidate
 
-        result[channel] = sorted(
+        # Берем только первые N лучших кандидатов
+        sorted_candidates = sorted(
             unique.values(),
             key=lambda x: (x.priority, x.score),
             reverse=True,
         )
+        result[channel] = sorted_candidates[:max_per_channel]
 
     logger.info(
         "Совпало обязательных каналов: %d; "
@@ -1047,6 +1034,7 @@ async def resolve_channels(
     ) as session:
 
         async def resolve(channel: str):
+            # Проверяем кандидатов по порядку, при первой рабочей ссылке — выходим
             for candidate in candidates.get(channel, []):
                 if await validator.check(
                     session,
@@ -1196,7 +1184,8 @@ async def main() -> None:
     loader = SourceLoader(config)
     entries = await loader.load()
 
-    candidates = build_candidates(entries, matcher)
+    max_candidates = int(config.get("max_candidates_per_channel", 5))
+    candidates = build_candidates(entries, matcher, max_candidates)
 
     db_path = resolve_path(config["database"])
     db = Database(db_path)
