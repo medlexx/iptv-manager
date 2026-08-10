@@ -1,32 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Virtual environment
-.venv/
-venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-
-# Logs
-logs/
-*.log
-
-# Temporary downloaded playlists
-downloaded_sources/
-
-# Temporary files
-*.tmp
-
-# SQLite temporary files
-*.db-shm
+runtime/
+*.db
 *.db-wal
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
+*.db-shm
+__pycache__/
+*.pyc
+iptv_manager.log
