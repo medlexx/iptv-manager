@@ -2,23 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-IPTV Manager — production version for GitHub Action.
-
-ВАЖНО:
-В ФАЙЛЕ iptv_manager.py ДОЛЖЕН БЫТЬ ТОЛЬКО PYTHON-КОД.
-Строки ```python и ``` в сам файл НЕ копировать.
-
-Назначение:
-- spisok.txt является строгим эталоном обязательных каналов;
-- источники берутся из папки sources/ и sources.yaml;
-- разные названия одного канала сопоставляются через нормализацию,
-  aliases.yaml и консервативный fuzzy matching;
-- для каждого обязательного канала проверяется максимум 5 лучших ссылок;
-- при нахождении первой рабочей ссылки проверка канала завершается;
-- SQLite хранит результаты проверок и последнюю рабочую ссылку;
-- новый плейлист НЕ заменяет старый, если хотя бы один обязательный
-  канал не найден с рабочей ссылкой (при strict_reference: True);
-- порядок каналов сохраняется таким же, как в spisok.txt.
+IPTV Manager — production version compatible with structured config.yaml.
 """
 
 from __future__ import annotations
@@ -43,38 +27,39 @@ from urllib.parse import urlparse
 import aiohttp
 import yaml
 
-
 ROOT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_CONFIG = {
     "reference_file": "spisok.txt",
-    "sources_file": "sources.yaml",
     "aliases_file": "aliases.yaml",
+    "sources_file": "sources.yaml",
     "sources_dir": "sources",
-    "output_playlist": "playlist/eternal_playlist.m3u8",
-    "database": "data/validation_cache.db",
+    "output_playlist": "output/eternal_playlist.m3u8",
+    "database": "data/channel_index.db",
     "report_file": "reports/status.txt",
 
-    "fuzzy_threshold": 0.82,
+    "fuzzy_threshold": 0.88,
     "max_candidates_per_channel": 5,
 
-    "http_timeout": 10,
+    "http_timeout": 8,
     "connect_timeout": 5,
     "read_timeout": 5,
 
-    "max_concurrent_validation": 40,
+    "max_concurrent_validation": 20,
     "max_concurrent_downloads": 8,
 
     "cache_ttl_seconds": 1800,
     "good_url_ttl_seconds": 7 * 24 * 3600,
-    "remote_source_ttl_seconds": 1800,
+    "remote_source_ttl_seconds": 6 * 3600,
 
     "download_remote_sources": True,
     "validate_streams": True,
     "use_ffprobe": True,
-    "ffprobe_timeout": 10,
+    "ffprobe_timeout": 8,
 
-    "strict_reference": True,
+    "strict_reference": False,
+    "include_unavailable": True,
+    "unavailable_url": "http://127.0.0.1:9/unavailable",
     "keep_last_good_url": True,
     "allow_unvalidated_urls": False,
 
@@ -153,8 +138,54 @@ def load_config() -> dict:
     config = dict(DEFAULT_CONFIG)
     path = ROOT_DIR / "config.yaml"
     data = load_yaml(path, {})
+
     if isinstance(data, dict):
-        config.update(data)
+        # Маппинг вложенного YAML в плоские параметры скрипта
+        if "sources" in data and isinstance(data["sources"], dict):
+            src = data["sources"]
+            if "local_directory" in src:
+                config["sources_dir"] = src["local_directory"]
+            if "remote_enabled" in src:
+                config["download_remote_sources"] = src["remote_enabled"]
+
+        if "database" in data and isinstance(data["database"], dict):
+            if "path" in data["database"]:
+                config["database"] = data["database"]["path"]
+
+        if "output" in data and isinstance(data["output"], dict):
+            out = data["output"]
+            if "playlist" in out:
+                config["output_playlist"] = out["playlist"]
+            if "include_unavailable" in out:
+                config["include_unavailable"] = out["include_unavailable"]
+            if "unavailable_url" in out:
+                config["unavailable_url"] = out["unavailable_url"]
+
+        if "matching" in data and isinstance(data["matching"], dict):
+            m = data["matching"]
+            if "fuzzy_threshold" in m:
+                config["fuzzy_threshold"] = m["fuzzy_threshold"]
+
+        if "validation" in data and isinstance(data["validation"], dict):
+            v = data["validation"]
+            if "enabled" in v:
+                config["validate_streams"] = v["enabled"]
+            if "http_timeout" in v:
+                config["http_timeout"] = v["http_timeout"]
+            if "ffprobe_enabled" in v:
+                config["use_ffprobe"] = v["ffprobe_enabled"]
+            if "ffprobe_timeout" in v:
+                config["ffprobe_timeout"] = v["ffprobe_timeout"]
+            if "max_concurrent" in v:
+                config["max_concurrent_validation"] = v["max_concurrent"]
+            if "cache_ttl" in v:
+                config["cache_ttl_seconds"] = v["cache_ttl"]
+
+        if "remote" in data and isinstance(data["remote"], dict):
+            r = data["remote"]
+            if "refresh_hours" in r:
+                config["remote_source_ttl_seconds"] = int(r["refresh_hours"]) * 3600
+
     return config
 
 
@@ -526,6 +557,8 @@ class SourceLoader:
             async def one(item: SourceDefinition) -> List[SourceEntry]:
                 async with semaphore:
                     if is_url(item.location):
+                        if not self.config.get("download_remote_sources", True):
+                            return []
                         return await self._remote(session, item)
 
                     path = Path(item.location)
@@ -989,7 +1022,6 @@ def build_candidates(
             ):
                 unique[candidate.url] = candidate
 
-        # Берем только первые N лучших кандидатов
         sorted_candidates = sorted(
             unique.values(),
             key=lambda x: (x.priority, x.score),
@@ -1034,7 +1066,6 @@ async def resolve_channels(
     ) as session:
 
         async def resolve(channel: str):
-            # Проверяем кандидатов по порядку, при первой рабочей ссылке — выходим
             for candidate in candidates.get(channel, []):
                 if await validator.check(
                     session,
@@ -1068,12 +1099,6 @@ async def resolve_channels(
                                 "last_good",
                             ),
                         )
-
-            if (
-                config["allow_unvalidated_urls"]
-                and candidates.get(channel)
-            ):
-                return channel, candidates[channel][0]
 
             return channel, None
 
@@ -1113,11 +1138,17 @@ def write_playlist(
         f'#PLAYLIST:{config["playlist_name"]}',
     ]
 
+    include_unavailable = config.get("include_unavailable", True)
+    fallback_url = config.get("unavailable_url", "http://127.0.0.1:9/unavailable")
+
     for channel in reference:
         candidate = resolved.get(channel)
         if candidate:
             lines.append(f'#EXTINF:-1 tvg-name="{channel}",{channel}')
             lines.append(candidate.url)
+        elif include_unavailable:
+            lines.append(f'#EXTINF:-1 tvg-name="{channel}",{channel}')
+            lines.append(fallback_url)
 
     content = "\n".join(lines) + "\n"
     atomic_write(output, content)
@@ -1139,13 +1170,13 @@ def write_report(
         f"=== Отчет IPTV Manager ({timestamp}) ===",
         f"Всего обязательных каналов: {total_ref}",
         f"Успешно найдено и проверено: {len(resolved)}",
-        f"Отсутствует или не работает: {len(missing)}",
-        f"Статус обновления плейлиста: {'ОБНОВЛЕН' if playlist_updated else 'ПРОПУЩЕН (есть нерабочие каналы)'}",
+        f"Заменено заглушкой (ненайдены/нерабочие): {len(missing)}",
+        f"Статус обновления плейлиста: ОБНОВЛЕН",
         "",
     ]
 
     if missing:
-        lines.append("--- Ненайденные / нерабочие каналы ---")
+        lines.append("--- Каналы с заглушкой (unavailable_url) ---")
         for ch in missing:
             lines.append(f"- {ch}")
         lines.append("")
@@ -1200,34 +1231,19 @@ async def main() -> None:
             validator,
         )
 
-        strict = config.get("strict_reference", True)
-        playlist_updated = False
-
-        if missing and strict:
-            logger.error(
-                "Внимание! Не найдены обязательные каналы (%d шт.): %s",
-                len(missing),
-                ", ".join(missing),
-            )
-            logger.warning(
-                "Плейлист не будет обновлен, так как включен параметр strict_reference=True."
-            )
-        else:
-            write_playlist(config, reference_channels, resolved)
-            playlist_updated = True
-
+        write_playlist(config, reference_channels, resolved)
         write_report(
             config,
             len(reference_channels),
             resolved,
             missing,
-            playlist_updated,
+            True,
         )
 
     finally:
         db.close()
 
-    logger.info("Работа IPTV Manager завершена.")
+    logger.info("Работа IPTV Manager завершена успешно.")
 
 
 if __name__ == "__main__":
