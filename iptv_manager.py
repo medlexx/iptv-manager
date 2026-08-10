@@ -2,68 +2,44 @@
 # -*- coding: utf-8 -*-
 
 """
-IPTV Playlist Manager — GitHub Edition
-=======================================
+IPTV Manager
+============
 
-Назначение:
-    Автоматическое формирование IPTV-плейлиста на основе spisok.txt.
+Полноценный менеджер IPTV-плейлиста.
 
-Главный принцип:
-    spisok.txt является АБСОЛЮТНЫМ эталоном.
+Основные принципы:
 
-Гарантии:
-    1. В новый playlist попадают только каналы из spisok.txt.
-    2. Лишние каналы никогда не попадают в playlist.
-    3. Для каждого канала проверяются все доступные URL.
-    4. URL выбирается по приоритету источника.
-    5. Если URL с высоким приоритетом не работает,
-       выбирается следующий рабочий URL.
-    6. Перед публикацией выполняется строгая проверка состава.
-    7. Если хотя бы одного эталонного канала нет рабочего URL,
-       новый playlist НЕ публикуется.
-    8. Предыдущий рабочий playlist сохраняется.
-    9. GitHub Actions может запускать скрипт периодически.
-   10. Скрипт поддерживает:
-         - удалённые M3U/M3U8/TXT источники;
-         - локальные файлы из sources/;
-         - fuzzy matching;
-         - aliases;
-         - HTTP-проверку;
-         - FFprobe-проверку;
-         - приоритеты источников;
-         - диагностический отчёт.
-
-Python:
-    3.10+
-
-Зависимости:
-    aiohttp
-    aiofiles
-    PyYAML
-    tenacity
-
-FFprobe:
-    Если ffprobe установлен, выполняется дополнительная проверка
-    медиапотока. Если ffprobe отсутствует, используется HTTP-проверка.
+1. spisok.txt является ЖЁСТКИМ белым списком.
+2. В итоговый playlist попадают только каналы из spisok.txt.
+3. Один канал может иметь множество URL из разных источников.
+4. URL имеют приоритет.
+5. Рабочий URL выбирается автоматически.
+6. Нерабочий URL не удаляется из базы — он остаётся резервом.
+7. Локальные источники индексируются инкрементально.
+8. Удалённые M3U можно подключать через sources.yaml.
+9. Разные названия одного канала объединяются через aliases.yaml,
+   точное совпадение и безопасный fuzzy matching.
+10. База SQLite хранит найденные URL и историю проверки.
+11. Итоговый playlist генерируется атомарно.
+12. Скрипт может работать локально и в GitHub Actions.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
-import shutil
+import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
-
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from difflib import SequenceMatcher
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import aiofiles
@@ -78,26 +54,33 @@ import yaml
 BASE_DIR = Path(__file__).resolve().parent
 
 CONFIG_FILE = BASE_DIR / "config.yaml"
-SOURCES_FILE = BASE_DIR / "sources.yaml"
+SOURCES_CONFIG_FILE = BASE_DIR / "sources.yaml"
+CHANNELS_CONFIG_FILE = BASE_DIR / "channels.yaml"
+ALIASES_CONFIG_FILE = BASE_DIR / "aliases.yaml"
 REFERENCE_FILE = BASE_DIR / "spisok.txt"
 
-PUBLIC_DIR = BASE_DIR / "public"
-PLAYLIST_FILE = PUBLIC_DIR / "eternal_playlist.m3u8"
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
 
-SOURCES_DIR = BASE_DIR / "sources"
+DATABASE_FILE = DATA_DIR / "channel_index.db"
+PLAYLIST_FILE = OUTPUT_DIR / "eternal_playlist.m3u8"
 
 LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "iptv_manager.log"
 
-DIAGNOSTIC_FILE = PUBLIC_DIR / "iptv_diagnostics.json"
+
+# ============================================================================
+# DIRECTORIES
+# ============================================================================
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================================
 # LOGGING
 # ============================================================================
-
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-PUBLIC_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,86 +102,79 @@ logger = logging.getLogger("iptv_manager")
 # ============================================================================
 
 DEFAULT_CONFIG = {
+    "sources": {
+        "local_directory": "sources",
+        "download_directory": "downloaded_sources",
+        "remote_enabled": True,
+    },
+
+    "database": {
+        "path": "data/channel_index.db",
+    },
+
+    "output": {
+        "playlist": "output/eternal_playlist.m3u8",
+        "include_unavailable": True,
+        "unavailable_url": "http://127.0.0.1:9/unavailable",
+    },
+
     "matching": {
-        "fuzzy_threshold": 0.78,
-        "min_normalized_length": 2,
+        "fuzzy_enabled": True,
+        "fuzzy_threshold": 0.88,
+        "minimum_normalized_length": 2,
     },
 
     "validation": {
-        "http_timeout": 12,
-        "connect_timeout": 7,
-        "read_timeout": 10,
-        "max_concurrent": 30,
-        "validate_with_ffprobe": True,
-        "ffprobe_timeout": 10,
-        "http_chunk_size": 8192,
-        "min_http_bytes": 256,
-        "retries": 2,
-    },
-
-    "sources": {
-        "download_timeout": 60,
-        "max_download_size_mb": 100,
-        "allow_local_files": True,
+        "enabled": True,
+        "http_timeout": 8,
+        "ffprobe_enabled": True,
+        "ffprobe_timeout": 8,
+        "max_concurrent": 20,
+        "cache_ttl": 1800,
+        "retry_count": 1,
     },
 
     "playlist": {
-        "output_file": "public/eternal_playlist.m3u8",
-        "encoding": "utf-8",
-        "include_group": True,
-        "group_title": "IPTV",
+        "sort_by": "reference_order",
+        "default_group": "TV",
     },
 
-    "safety": {
-        "require_all_reference_channels": True,
-        "never_publish_incomplete": True,
-        "keep_previous_playlist": True,
+    "remote": {
+        "refresh_hours": 6,
     },
 
-    "diagnostic_mode": True,
+    "diagnostics": {
+        "enabled": True,
+        "unmatched_limit": 30,
+    },
 }
 
 
 # ============================================================================
-# DATA CLASSES
+# UTILITIES
 # ============================================================================
 
-@dataclass(frozen=True)
-class Source:
-    name: str
-    url: str
-    priority: int
-    enabled: bool = True
+def load_yaml(path: Path, default: dict) -> dict:
+    if not path.exists():
+        logger.warning("Файл не найден: %s", path)
+        return default.copy()
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        if not isinstance(data, dict):
+            logger.warning("Некорректный YAML: %s", path)
+            return default.copy()
+
+        return data
+
+    except Exception as exc:
+        logger.error("Ошибка чтения YAML %s: %s", path, exc)
+        return default.copy()
 
 
-@dataclass
-class Candidate:
-    reference_name: str
-    source_name: str
-    source_priority: int
-    url: str
-    raw_name: str
-    match_score: float
-
-
-@dataclass
-class ValidationResult:
-    url: str
-    valid: bool
-    http_valid: bool
-    media_valid: bool
-    reason: str
-    elapsed: float
-
-
-# ============================================================================
-# CONFIG LOADING
-# ============================================================================
-
-def deep_merge(base: dict, override: dict) -> dict:
-    """
-    Рекурсивно объединяет словари.
-    """
+def merge_dicts(base: dict, override: dict) -> dict:
     result = dict(base)
 
     for key, value in override.items():
@@ -207,132 +183,172 @@ def deep_merge(base: dict, override: dict) -> dict:
             and isinstance(result[key], dict)
             and isinstance(value, dict)
         ):
-            result[key] = deep_merge(result[key], value)
+            result[key] = merge_dicts(result[key], value)
         else:
             result[key] = value
 
     return result
 
 
-def load_yaml(path: Path) -> dict:
-    if not path.exists():
-        return {}
-
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-
-        if not isinstance(data, dict):
-            return {}
-
-        return data
-
-    except Exception as exc:
-        logger.error("Ошибка чтения %s: %s", path, exc)
-        return {}
-
-
 def load_config() -> dict:
-    config = dict(DEFAULT_CONFIG)
+    user_config = load_yaml(CONFIG_FILE, {})
+    return merge_dicts(DEFAULT_CONFIG, user_config)
 
-    user_config = load_yaml(CONFIG_FILE)
 
-    if user_config:
-        config = deep_merge(config, user_config)
-
-    return config
+CONFIG = load_config()
 
 
 # ============================================================================
-# NAME NORMALIZATION
+# NORMALIZATION
 # ============================================================================
 
-STRIP_WORDS = re.compile(
-    r"""
-    \b(
-        hd|
-        sd|
-        fhd|
-        uhd|
-        4k|
-        8k|
-        hevc|
-        h264|
-        h265|
-        1080p|
-        720p|
-        576p|
-        480p|
-        tv|
-        channel|
-        кан|
-        канал|
-        тв|
-        rus|
-        ru|
-        eng|
-        en|
-        backup|
-        резерв|
-        rez|
-        rezrv|
-        online|
-        онлайн|
-        live|
-        прямой|
-        эфир|
-        orig|
-        original|
-        stream|
-        test
-    )\b
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-
-MULTISPACE_PATTERN = re.compile(r"\s+")
-
-CLEAN_PATTERN = re.compile(
-    r"[^a-zа-яё0-9]+",
-    re.IGNORECASE,
-)
+REMOVE_WORDS = {
+    "hd",
+    "sd",
+    "fhd",
+    "uhd",
+    "4k",
+    "8k",
+    "1080p",
+    "720p",
+    "576p",
+    "480p",
+    "hevc",
+    "h264",
+    "h265",
+    "avc",
+    "aac",
+    "mpeg",
+    "mpeg2",
+    "mpeg4",
+    "tv",
+    "channel",
+    "канал",
+    "каналы",
+    "тв",
+    "rus",
+    "ru",
+    "russia",
+    "россия",
+    "eng",
+    "en",
+    "uk",
+    "ua",
+    "backup",
+    "резерв",
+    "резервный",
+    "reserve",
+    "online",
+    "онлайн",
+    "live",
+    "прямой",
+    "эфир",
+    "orig",
+    "original",
+    "originals",
+    "default",
+}
 
 
 def normalize_name(name: str) -> str:
     """
-    Нормализует название канала.
+    Приводит название к устойчивой форме.
 
     Примеры:
 
-        "VF Сериалы Турции HD"
-            ->
-        "vfсериалытурции"
+        Кино ТВ HD
+        КИНО ТВ FHD
+        Kino TV 1080p
 
-        "Viasat Kino World orig"
-            ->
-        "viasatkinoworld"
-
-        "2×2"
-            ->
-        "22"
+    могут свестись к одной форме.
     """
 
     if not name:
         return ""
 
-    value = str(name).strip().lower()
+    text = str(name).strip().lower()
 
-    value = value.replace("ё", "е")
-    value = value.replace("×", "x")
-    value = value.replace("&", "and")
+    text = text.replace("ё", "е")
+    text = text.replace("×", "x")
 
-    value = STRIP_WORDS.sub(" ", value)
+    # HTML entities
+    text = re.sub(r"&amp;", " ", text)
+    text = re.sub(r"&quot;", " ", text)
 
-    value = MULTISPACE_PATTERN.sub(" ", value)
+    # Сначала отделяем слова.
+    tokens = re.findall(
+        r"[a-zа-я0-9]+",
+        text,
+        flags=re.IGNORECASE,
+    )
 
-    value = CLEAN_PATTERN.sub("", value)
+    filtered = []
 
-    return value
+    for token in tokens:
+        if token in REMOVE_WORDS:
+            continue
+
+        if re.fullmatch(r"\d{3,4}p", token):
+            continue
+
+        if re.fullmatch(r"\d{3,4}", token):
+            # Не удаляем обычные названия с цифрами вроде 2x2.
+            if token in {"1080", "720", "576", "480", "2160"}:
+                continue
+
+        filtered.append(token)
+
+    return "".join(filtered)
+
+
+def normalize_url(url: str) -> str:
+    return url.strip()
+
+
+def is_url(line: str) -> bool:
+    if not line:
+        return False
+
+    value = line.strip().lower()
+
+    return value.startswith(
+        (
+            "http://",
+            "https://",
+            "rtmp://",
+            "rtsp://",
+            "udp://",
+            "rtp://",
+            "srt://",
+        )
+    )
+
+
+def file_hash(path: Path) -> str:
+    sha = hashlib.sha256()
+
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+
+            if not chunk:
+                break
+
+            sha.update(chunk)
+
+    return sha.hexdigest()
+
+
+# ============================================================================
+# REFERENCE CHANNEL
+# ============================================================================
+
+@dataclass
+class ReferenceChannel:
+    name: str
+    normalized: str
+    order: int
+    group: str = "TV"
 
 
 # ============================================================================
@@ -340,31 +356,11 @@ def normalize_name(name: str) -> str:
 # ============================================================================
 
 class ReferenceParser:
-    """
-    spisok.txt:
 
-        371
-        VF Сериалы Турции
-        3 дня
-
-        372
-        VF Вестерн
-        7 дней
-
-    Извлекаются только названия каналов.
-    """
-
-    NUMBER_PATTERN = re.compile(
-        r"^\s*\d+\s*$"
-    )
+    NUMBER_PATTERN = re.compile(r"^\s*\d+\s*$")
 
     DURATION_PATTERN = re.compile(
         r"^\s*\d+\s*(день|дня|дней|дн|д)\s*$",
-        re.IGNORECASE,
-    )
-
-    URL_PATTERN = re.compile(
-        r"^(https?|rtmp|rtsp|udp)://",
         re.IGNORECASE,
     )
 
@@ -372,24 +368,25 @@ class ReferenceParser:
     async def parse(
         cls,
         path: Path,
-    ) -> List[str]:
+    ) -> List[ReferenceChannel]:
 
         if not path.exists():
             raise FileNotFoundError(
                 f"Эталонный файл не найден: {path}"
             )
 
-        result: List[str] = []
+        channels: List[ReferenceChannel] = []
         seen: Set[str] = set()
 
         async with aiofiles.open(
             path,
             "r",
             encoding="utf-8-sig",
-            errors="ignore",
         ) as f:
 
             lines = await f.readlines()
+
+        order = 0
 
         for raw_line in lines:
 
@@ -407,199 +404,916 @@ class ReferenceParser:
             if cls.DURATION_PATTERN.fullmatch(line):
                 continue
 
-            if cls.URL_PATTERN.match(line):
+            if is_url(line):
                 continue
 
             normalized = normalize_name(line)
 
-            if len(normalized) < 2:
+            if len(normalized) < CONFIG["matching"]["minimum_normalized_length"]:
                 continue
 
             if normalized in seen:
-                logger.warning(
-                    "Дубликат в spisok.txt пропущен: %s",
-                    line,
-                )
                 continue
 
             seen.add(normalized)
-            result.append(line)
+
+            order += 1
+
+            channels.append(
+                ReferenceChannel(
+                    name=line,
+                    normalized=normalized,
+                    order=order,
+                    group="TV",
+                )
+            )
 
         logger.info(
-            "Эталонный список загружен: %d каналов",
-            len(result),
+            "spisok.txt: найдено обязательных каналов: %d",
+            len(channels),
         )
 
-        if not result:
+        if not channels:
             raise RuntimeError(
-                "spisok.txt не содержит ни одного канала"
+                "spisok.txt пуст или не содержит распознаваемых каналов"
+            )
+
+        return channels
+
+
+# ============================================================================
+# CHANNEL CONFIG
+# ============================================================================
+
+class ChannelConfig:
+
+    def __init__(self, path: Path):
+        self.groups: Dict[str, str] = {}
+        self.enabled: Dict[str, bool] = {}
+
+        data = load_yaml(path, {})
+
+        channels = data.get("channels", [])
+
+        if isinstance(channels, list):
+
+            for item in channels:
+
+                if not isinstance(item, dict):
+                    continue
+
+                name = str(item.get("name", "")).strip()
+
+                if not name:
+                    continue
+
+                normalized = normalize_name(name)
+
+                self.groups[normalized] = str(
+                    item.get("group", "TV")
+                ).strip() or "TV"
+
+                self.enabled[normalized] = bool(
+                    item.get("enabled", True)
+                )
+
+    def apply(
+        self,
+        channels: List[ReferenceChannel],
+    ) -> None:
+
+        for channel in channels:
+
+            group = self.groups.get(
+                channel.normalized,
+                channel.group,
+            )
+
+            enabled = self.enabled.get(
+                channel.normalized,
+                True,
+            )
+
+            channel.group = group
+
+            if not enabled:
+                channel.group = "DISABLED"
+
+
+# ============================================================================
+# ALIASES
+# ============================================================================
+
+class AliasMatcher:
+
+    def __init__(
+        self,
+        aliases_path: Path,
+        reference_channels: List[ReferenceChannel],
+    ):
+
+        self.alias_to_reference: Dict[str, str] = {}
+
+        reference_by_normalized = {
+            c.normalized: c
+            for c in reference_channels
+        }
+
+        data = load_yaml(aliases_path, {})
+
+        aliases = data.get("aliases", {})
+
+        if not isinstance(aliases, dict):
+            return
+
+        for alias, reference_name in aliases.items():
+
+            alias_norm = normalize_name(str(alias))
+            ref_norm = normalize_name(str(reference_name))
+
+            if not alias_norm or not ref_norm:
+                continue
+
+            if ref_norm in reference_by_normalized:
+                self.alias_to_reference[alias_norm] = ref_norm
+
+        logger.info(
+            "Загружено aliases: %d",
+            len(self.alias_to_reference),
+        )
+
+    def resolve_exact(
+        self,
+        normalized_name: str,
+    ) -> Optional[str]:
+
+        return self.alias_to_reference.get(normalized_name)
+
+
+# ============================================================================
+# SAFE FUZZY MATCHER
+# ============================================================================
+
+class SafeMatcher:
+
+    def __init__(
+        self,
+        reference_channels: List[ReferenceChannel],
+        alias_matcher: AliasMatcher,
+    ):
+
+        self.reference = reference_channels
+        self.aliases = alias_matcher
+
+        self.by_normalized = {
+            c.normalized: c
+            for c in reference_channels
+        }
+
+        self.threshold = float(
+            CONFIG["matching"]["fuzzy_threshold"]
+        )
+
+    def match(
+        self,
+        raw_name: str,
+    ) -> Optional[ReferenceChannel]:
+
+        normalized = normalize_name(raw_name)
+
+        if not normalized:
+            return None
+
+        # ------------------------------------------------------------
+        # 1. EXACT
+        # ------------------------------------------------------------
+
+        exact = self.by_normalized.get(normalized)
+
+        if exact:
+            return exact
+
+        # ------------------------------------------------------------
+        # 2. ALIAS
+        # ------------------------------------------------------------
+
+        alias_norm = self.aliases.resolve_exact(normalized)
+
+        if alias_norm:
+            return self.by_normalized.get(alias_norm)
+
+        # ------------------------------------------------------------
+        # 3. FUZZY
+        # ------------------------------------------------------------
+
+        if not CONFIG["matching"]["fuzzy_enabled"]:
+            return None
+
+        best: Optional[ReferenceChannel] = None
+        best_ratio = 0.0
+
+        for channel in self.reference:
+
+            ratio = SequenceMatcher(
+                None,
+                normalized,
+                channel.normalized,
+            ).ratio()
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best = channel
+
+        if best and best_ratio >= self.threshold:
+
+            # Дополнительная защита.
+            # Очень короткие названия нельзя fuzzy-сопоставлять.
+            if len(normalized) < 5:
+                return None
+
+            logger.debug(
+                "Fuzzy: '%s' -> '%s' ratio=%.3f",
+                raw_name,
+                best.name,
+                best_ratio,
+            )
+
+            return best
+
+        return None
+
+
+# ============================================================================
+# M3U PARSER
+# ============================================================================
+
+class M3UParser:
+
+    EXTINF_RE = re.compile(
+        r"^#EXTINF\s*:\s*-?\d+(?:\s+[^,]*)?,\s*(.*)$",
+        re.IGNORECASE,
+    )
+
+    EXTGRP_RE = re.compile(
+        r'group-title\s*=\s*"([^"]*)"',
+        re.IGNORECASE,
+    )
+
+    TVG_NAME_RE = re.compile(
+        r'tvg-name\s*=\s*"([^"]*)"',
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    async def parse(
+        cls,
+        path: Path,
+    ) -> List[Tuple[str, str, str]]:
+
+        result = []
+
+        current_name: Optional[str] = None
+        current_group = "TV"
+
+        try:
+
+            async with aiofiles.open(
+                path,
+                "r",
+                encoding="utf-8-sig",
+                errors="ignore",
+            ) as f:
+
+                async for raw_line in f:
+
+                    line = raw_line.strip()
+
+                    if not line:
+                        continue
+
+                    if line.upper().startswith("#EXTINF"):
+
+                        match = cls.EXTINF_RE.match(line)
+
+                        if match:
+                            current_name = match.group(1).strip()
+                        else:
+                            current_name = None
+
+                        group_match = cls.EXTGRP_RE.search(line)
+
+                        if group_match:
+                            current_group = (
+                                group_match.group(1).strip()
+                                or "TV"
+                            )
+                        else:
+                            current_group = "TV"
+
+                        tvg_match = cls.TVG_NAME_RE.search(line)
+
+                        if tvg_match and tvg_match.group(1).strip():
+                            # Название из tvg-name используем только
+                            # если EXTINF-название отсутствует.
+                            if not current_name:
+                                current_name = (
+                                    tvg_match.group(1).strip()
+                                )
+
+                        continue
+
+                    if line.startswith("#"):
+                        continue
+
+                    if is_url(line):
+
+                        name = current_name
+
+                        if not name:
+                            parsed = urlparse(line)
+                            name = (
+                                Path(parsed.path).stem
+                                or "Unknown"
+                            )
+
+                        result.append(
+                            (
+                                name.strip(),
+                                line.strip(),
+                                current_group,
+                            )
+                        )
+
+                        current_name = None
+                        current_group = "TV"
+
+        except Exception as exc:
+
+            logger.error(
+                "Ошибка чтения %s: %s",
+                path,
+                exc,
             )
 
         return result
 
 
 # ============================================================================
-# SOURCE LOADER
+# DATABASE
 # ============================================================================
 
-def load_sources_config() -> List[Source]:
+class Database:
 
-    data = load_yaml(SOURCES_FILE)
+    def __init__(self, path: Path):
 
-    source_items = data.get("sources", [])
+        self.path = path
 
-    if not isinstance(source_items, list):
-        raise ValueError(
-            "sources.yaml: параметр 'sources' должен быть списком"
+        self.conn = sqlite3.connect(
+            str(path),
+            check_same_thread=False,
         )
 
-    result: List[Source] = []
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
 
-    for item in source_items:
+        self.create_tables()
 
-        if not isinstance(item, dict):
-            continue
+    def create_tables(self):
 
-        name = str(item.get("name", "")).strip()
-        url = str(item.get("url", "")).strip()
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS source_files (
+                path TEXT PRIMARY KEY,
+                sha256 TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                mtime REAL NOT NULL,
+                indexed_at REAL NOT NULL
+            );
 
-        if not name or not url:
-            continue
+            CREATE TABLE IF NOT EXISTS urls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reference_name TEXT NOT NULL,
+                reference_normalized TEXT NOT NULL,
+                url TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_priority INTEGER NOT NULL DEFAULT 10,
+                first_seen REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                last_checked REAL,
+                is_alive INTEGER,
+                response_time REAL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(reference_normalized, url)
+            );
 
-        priority = int(item.get("priority", 10))
-        enabled = bool(item.get("enabled", True))
+            CREATE INDEX IF NOT EXISTS idx_urls_reference
+                ON urls(reference_normalized);
 
-        if not enabled:
-            continue
+            CREATE INDEX IF NOT EXISTS idx_urls_alive
+                ON urls(is_alive);
 
-        result.append(
-            Source(
-                name=name,
-                url=url,
-                priority=priority,
-                enabled=enabled,
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            """
+        )
+
+        self.conn.commit()
+
+    def is_source_changed(
+        self,
+        path: Path,
+    ) -> bool:
+
+        stat = path.stat()
+
+        row = self.conn.execute(
+            """
+            SELECT sha256, size, mtime
+            FROM source_files
+            WHERE path = ?
+            """,
+            (str(path),),
+        ).fetchone()
+
+        if not row:
+            return True
+
+        old_hash, old_size, old_mtime = row
+
+        if old_size != stat.st_size:
+            return True
+
+        if abs(old_mtime - stat.st_mtime) > 0.01:
+            return True
+
+        # mtime/size одинаковые — дополнительная проверка hash
+        current_hash = file_hash(path)
+
+        return current_hash != old_hash
+
+    def mark_source_indexed(
+        self,
+        path: Path,
+    ):
+
+        stat = path.stat()
+        digest = file_hash(path)
+
+        self.conn.execute(
+            """
+            INSERT INTO source_files
+                (path, sha256, size, mtime, indexed_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                sha256=excluded.sha256,
+                size=excluded.size,
+                mtime=excluded.mtime,
+                indexed_at=excluded.indexed_at
+            """,
+            (
+                str(path),
+                digest,
+                stat.st_size,
+                stat.st_mtime,
+                time.time(),
+            ),
+        )
+
+        self.conn.commit()
+
+    def remove_urls_from_source(
+        self,
+        source: str,
+    ):
+
+        self.conn.execute(
+            "DELETE FROM urls WHERE source = ?",
+            (source,),
+        )
+
+        self.conn.commit()
+
+    def add_url(
+        self,
+        reference_name: str,
+        reference_normalized: str,
+        url: str,
+        source: str,
+        priority: int,
+    ):
+
+        now = time.time()
+
+        self.conn.execute(
+            """
+            INSERT INTO urls (
+                reference_name,
+                reference_normalized,
+                url,
+                source,
+                source_priority,
+                first_seen,
+                last_seen
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+
+            ON CONFLICT(reference_normalized, url)
+            DO UPDATE SET
+                reference_name=excluded.reference_name,
+                source=excluded.source,
+                source_priority=excluded.source_priority,
+                last_seen=excluded.last_seen
+            """,
+            (
+                reference_name,
+                reference_normalized,
+                url,
+                source,
+                priority,
+                now,
+                now,
+            ),
         )
 
-    logger.info(
-        "Удалённых источников в sources.yaml: %d",
-        len(result),
-    )
+    def commit(self):
+        self.conn.commit()
 
-    return result
+    def get_urls(
+        self,
+        reference_normalized: str,
+    ) -> List[dict]:
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                id,
+                reference_name,
+                url,
+                source,
+                source_priority,
+                last_checked,
+                is_alive,
+                response_time,
+                success_count,
+                failure_count
+            FROM urls
+            WHERE reference_normalized = ?
+            ORDER BY
+                CASE
+                    WHEN is_alive = 1 THEN 0
+                    ELSE 1
+                END,
+                source_priority DESC,
+                success_count DESC,
+                failure_count ASC
+            """,
+            (reference_normalized,),
+        ).fetchall()
+
+        result = []
+
+        for row in rows:
+
+            result.append(
+                {
+                    "id": row[0],
+                    "reference_name": row[1],
+                    "url": row[2],
+                    "source": row[3],
+                    "priority": row[4],
+                    "last_checked": row[5],
+                    "is_alive": row[6],
+                    "response_time": row[7],
+                    "success_count": row[8],
+                    "failure_count": row[9],
+                }
+            )
+
+        return result
+
+    def update_validation(
+        self,
+        url_id: int,
+        alive: bool,
+        response_time: Optional[float],
+    ):
+
+        now = time.time()
+
+        if alive:
+
+            self.conn.execute(
+                """
+                UPDATE urls
+                SET
+                    last_checked = ?,
+                    is_alive = 1,
+                    response_time = ?,
+                    success_count = success_count + 1
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    response_time,
+                    url_id,
+                ),
+            )
+
+        else:
+
+            self.conn.execute(
+                """
+                UPDATE urls
+                SET
+                    last_checked = ?,
+                    is_alive = 0,
+                    response_time = ?,
+                    failure_count = failure_count + 1
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    response_time,
+                    url_id,
+                ),
+            )
+
+    def get_statistics(self) -> dict:
+
+        total_urls = self.conn.execute(
+            "SELECT COUNT(*) FROM urls"
+        ).fetchone()[0]
+
+        alive_urls = self.conn.execute(
+            "SELECT COUNT(*) FROM urls WHERE is_alive = 1"
+        ).fetchone()[0]
+
+        channels = self.conn.execute(
+            """
+            SELECT COUNT(DISTINCT reference_normalized)
+            FROM urls
+            """
+        ).fetchone()[0]
+
+        return {
+            "urls": total_urls,
+            "alive_urls": alive_urls,
+            "channels": channels,
+        }
+
+    def close(self):
+
+        self.conn.commit()
+        self.conn.close()
 
 
 # ============================================================================
-# HTTP DOWNLOAD
+# SOURCES
 # ============================================================================
 
-class SourceDownloader:
+@dataclass
+class SourceDefinition:
+    name: str
+    source_type: str
+    location: str
+    priority: int
+    enabled: bool = True
 
-    def __init__(self, config: dict):
 
-        self.timeout = int(
-            config["sources"]["download_timeout"]
+class SourceManager:
+
+    def __init__(self):
+
+        self.sources: List[SourceDefinition] = []
+
+        data = load_yaml(
+            SOURCES_CONFIG_FILE,
+            {},
         )
 
-        self.max_size = int(
-            config["sources"]["max_download_size_mb"]
-        ) * 1024 * 1024
+        sources = data.get("sources", [])
+
+        if not isinstance(sources, list):
+            sources = []
+
+        for item in sources:
+
+            if not isinstance(item, dict):
+                continue
+
+            name = str(
+                item.get("name", "")
+            ).strip()
+
+            source_type = str(
+                item.get("type", "local")
+            ).strip().lower()
+
+            location = str(
+                item.get("path")
+                or item.get("url")
+                or ""
+            ).strip()
+
+            priority = int(
+                item.get("priority", 10)
+            )
+
+            enabled = bool(
+                item.get("enabled", True)
+            )
+
+            if not name or not location:
+                continue
+
+            self.sources.append(
+                SourceDefinition(
+                    name=name,
+                    source_type=source_type,
+                    location=location,
+                    priority=priority,
+                    enabled=enabled,
+                )
+            )
+
+    def local_files(self) -> List[Tuple[Path, str, int]]:
+
+        result = []
+
+        # Автоматически индексируем ВСЕ файлы в sources/.
+        default_dir = BASE_DIR / CONFIG["sources"]["local_directory"]
+
+        if default_dir.exists():
+
+            for path in default_dir.rglob("*"):
+
+                if not path.is_file():
+                    continue
+
+                if path.suffix.lower() not in {
+                    ".m3u",
+                    ".m3u8",
+                    ".txt",
+                }:
+                    continue
+
+                result.append(
+                    (
+                        path,
+                        path.name,
+                        10,
+                    )
+                )
+
+        # Дополнительные локальные источники.
+        for source in self.sources:
+
+            if not source.enabled:
+                continue
+
+            if source.source_type != "local":
+                continue
+
+            path = Path(source.location)
+
+            if not path.is_absolute():
+                path = BASE_DIR / path
+
+            if path.is_file():
+
+                result.append(
+                    (
+                        path,
+                        source.name,
+                        source.priority,
+                    )
+                )
+
+            elif path.is_dir():
+
+                for file_path in path.rglob("*"):
+
+                    if not file_path.is_file():
+                        continue
+
+                    if file_path.suffix.lower() not in {
+                        ".m3u",
+                        ".m3u8",
+                        ".txt",
+                    }:
+                        continue
+
+                    result.append(
+                        (
+                            file_path,
+                            source.name,
+                            source.priority,
+                        )
+                    )
+
+        # Дедупликация.
+        unique = {}
+        for path, source, priority in result:
+            unique[str(path.resolve())] = (
+                path,
+                source,
+                priority,
+            )
+
+        return list(unique.values())
+
+    async def remote_sources(
+        self,
+    ) -> List[SourceDefinition]:
+
+        if not CONFIG["sources"]["remote_enabled"]:
+            return []
+
+        return [
+            source
+            for source in self.sources
+            if source.enabled
+            and source.source_type == "remote"
+        ]
+
+
+# ============================================================================
+# REMOTE DOWNLOADER
+# ============================================================================
+
+class RemoteDownloader:
+
+    def __init__(self):
+
+        self.timeout = aiohttp.ClientTimeout(
+            total=30
+        )
 
     async def download(
         self,
         session: aiohttp.ClientSession,
-        source: Source,
-    ) -> Optional[str]:
+        source: SourceDefinition,
+    ) -> Optional[Path]:
 
-        logger.info(
-            "Загрузка источника: %s",
+        download_dir = (
+            BASE_DIR
+            / CONFIG["sources"]["download_directory"]
+        )
+
+        download_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        safe_name = re.sub(
+            r"[^a-zA-Z0-9_.-]+",
+            "_",
             source.name,
+        )
+
+        output_path = download_dir / (
+            safe_name + ".m3u"
         )
 
         try:
 
-            timeout = aiohttp.ClientTimeout(
-                total=self.timeout
+            logger.info(
+                "Загрузка удалённого источника: %s",
+                source.name,
             )
 
             async with session.get(
-                source.url,
-                timeout=timeout,
+                source.location,
+                timeout=self.timeout,
                 allow_redirects=True,
             ) as response:
 
                 if response.status != 200:
 
                     logger.warning(
-                        "Источник %s: HTTP %s",
+                        "Источник %s вернул HTTP %s",
                         source.name,
                         response.status,
                     )
 
                     return None
 
-                content_length = response.headers.get(
-                    "Content-Length"
-                )
+                content = await response.read()
 
-                if content_length:
-
-                    try:
-                        if int(content_length) > self.max_size:
-                            logger.warning(
-                                "Источник %s слишком большой",
-                                source.name,
-                            )
-                            return None
-                    except ValueError:
-                        pass
-
-                chunks: List[bytes] = []
-                total = 0
-
-                async for chunk in response.content.iter_chunked(
-                    1024 * 64
-                ):
-
-                    total += len(chunk)
-
-                    if total > self.max_size:
-                        logger.warning(
-                            "Источник %s превысил лимит размера",
-                            source.name,
-                        )
-                        return None
-
-                    chunks.append(chunk)
-
-                raw = b"".join(chunks)
-
-                for encoding in (
-                    "utf-8",
-                    "utf-8-sig",
-                    "cp1251",
-                    "latin-1",
-                ):
-
-                    try:
-                        text = raw.decode(encoding)
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                else:
-                    logger.error(
-                        "Не удалось определить кодировку %s",
-                        source.name,
-                    )
+                if not content:
                     return None
 
-                logger.info(
-                    "Источник %s загружен: %d байт",
-                    source.name,
-                    len(raw),
-                )
+                async with aiofiles.open(
+                    output_path,
+                    "wb",
+                ) as f:
 
-                return text
+                    await f.write(content)
+
+            return output_path
 
         except Exception as exc:
 
@@ -613,505 +1327,204 @@ class SourceDownloader:
 
 
 # ============================================================================
-# LOCAL SOURCE LOADER
+# INDEXER
 # ============================================================================
 
-async def load_local_sources() -> List[Tuple[str, str, int]]:
-
-    result: List[Tuple[str, str, int]] = []
-
-    if not SOURCES_DIR.exists():
-        return result
-
-    extensions = {
-        ".m3u",
-        ".m3u8",
-        ".txt",
-    }
-
-    files = [
-        p
-        for p in SOURCES_DIR.rglob("*")
-        if p.is_file()
-        and p.suffix.lower() in extensions
-    ]
-
-    for path in files:
-
-        try:
-
-            async with aiofiles.open(
-                path,
-                "r",
-                encoding="utf-8-sig",
-                errors="ignore",
-            ) as f:
-
-                text = await f.read()
-
-            result.append(
-                (
-                    path.stem,
-                    text,
-                    10,
-                )
-            )
-
-            logger.info(
-                "Локальный источник: %s",
-                path,
-            )
-
-        except Exception as exc:
-
-            logger.warning(
-                "Ошибка чтения %s: %s",
-                path,
-                exc,
-            )
-
-    return result
-
-
-# ============================================================================
-# M3U PARSER
-# ============================================================================
-
-class M3UParser:
-
-    @staticmethod
-    def parse(
-        text: str,
-        source_name: str,
-        source_priority: int,
-    ) -> List[Candidate]:
-
-        lines = text.splitlines()
-
-        candidates: List[Candidate] = []
-
-        current_name: Optional[str] = None
-
-        for raw_line in lines:
-
-            line = raw_line.strip()
-
-            if not line:
-                continue
-
-            if line.startswith("#EXTINF:"):
-
-                comma_index = line.find(",")
-
-                if comma_index >= 0:
-                    current_name = line[
-                        comma_index + 1:
-                    ].strip()
-                else:
-                    current_name = None
-
-                continue
-
-            if line.startswith("#"):
-                continue
-
-            if not is_stream_url(line):
-                continue
-
-            if not current_name:
-                current_name = infer_name_from_url(line)
-
-            normalized = normalize_name(
-                current_name
-            )
-
-            if not normalized:
-                current_name = None
-                continue
-
-            candidates.append(
-                Candidate(
-                    reference_name="",
-                    source_name=source_name,
-                    source_priority=source_priority,
-                    url=line,
-                    raw_name=current_name,
-                    match_score=0.0,
-                )
-            )
-
-            current_name = None
-
-        return candidates
-
-
-# ============================================================================
-# URL UTILITIES
-# ============================================================================
-
-def is_stream_url(value: str) -> bool:
-
-    value = value.strip()
-
-    parsed = urlparse(value)
-
-    if parsed.scheme.lower() in {
-        "http",
-        "https",
-        "rtmp",
-        "rtmps",
-        "rtsp",
-        "udp",
-    }:
-        return True
-
-    return False
-
-
-def infer_name_from_url(url: str) -> str:
-
-    try:
-
-        parsed = urlparse(url)
-
-        path = parsed.path.rstrip("/")
-
-        if not path:
-            return url
-
-        name = Path(path).stem
-
-        name = name.replace("_", " ")
-        name = name.replace("-", " ")
-
-        return name
-
-    except Exception:
-
-        return url
-
-
-# ============================================================================
-# MATCHER
-# ============================================================================
-
-class ChannelMatcher:
+class Indexer:
 
     def __init__(
         self,
-        reference_names: List[str],
-        threshold: float,
-        aliases: Optional[Dict[str, str]] = None,
+        database: Database,
+        matcher: SafeMatcher,
     ):
 
-        self.threshold = threshold
+        self.db = database
+        self.matcher = matcher
 
-        self.reference_names = reference_names
+    async def index_file(
+        self,
+        path: Path,
+        source_name: str,
+        priority: int,
+        force: bool = False,
+    ) -> Tuple[int, int]:
 
-        self.norm_to_reference: Dict[str, str] = {}
+        if not path.exists():
+            return 0, 0
 
-        for name in reference_names:
+        if not force and not self.db.is_source_changed(path):
 
-            norm = normalize_name(name)
+            logger.info(
+                "Без изменений: %s",
+                path,
+            )
 
-            if norm:
-                self.norm_to_reference[norm] = name
-
-        self.aliases: Dict[str, str] = {}
-
-        if aliases:
-
-            for alias, reference in aliases.items():
-
-                alias_norm = normalize_name(alias)
-                reference_norm = normalize_name(reference)
-
-                if (
-                    alias_norm
-                    and reference_norm
-                    in self.norm_to_reference
-                ):
-
-                    self.aliases[alias_norm] = (
-                        self.norm_to_reference[
-                            reference_norm
-                        ]
-                    )
-
-        self.reference_norms = list(
-            self.norm_to_reference.keys()
-        )
+            return 0, 0
 
         logger.info(
-            "Матчер: %d эталонных каналов, threshold=%.2f, aliases=%d",
-            len(self.reference_names),
-            threshold,
-            len(self.aliases),
+            "Индексирование: %s",
+            path,
         )
 
-    def match(
+        # Удаляем старые записи конкретного файла.
+        source_key = str(path.resolve())
+
+        self.db.remove_urls_from_source(
+            source_key
+        )
+
+        entries = await M3UParser.parse(path)
+
+        matched = 0
+        unmatched = 0
+
+        for raw_name, url, group in entries:
+
+            channel = self.matcher.match(
+                raw_name
+            )
+
+            if not channel:
+
+                unmatched += 1
+
+                continue
+
+            self.db.add_url(
+                reference_name=channel.name,
+                reference_normalized=channel.normalized,
+                url=normalize_url(url),
+                source=source_key,
+                priority=priority,
+            )
+
+            matched += 1
+
+        self.db.mark_source_indexed(path)
+
+        self.db.commit()
+
+        logger.info(
+            "Источник %s: записей=%d, совпало=%d, "
+            "не совпало=%d",
+            path.name,
+            len(entries),
+            matched,
+            unmatched,
+        )
+
+        return matched, unmatched
+
+    async def index_all(
         self,
-        raw_name: str,
-    ) -> Tuple[Optional[str], float]:
+        force: bool = False,
+    ):
 
-        norm = normalize_name(raw_name)
+        manager = SourceManager()
 
-        if not norm:
-            return None, 0.0
+        local_files = manager.local_files()
 
-        if norm in self.norm_to_reference:
+        logger.info(
+            "Локальных файлов найдено: %d",
+            len(local_files),
+        )
 
-            return (
-                self.norm_to_reference[norm],
-                1.0,
+        total_matched = 0
+        total_unmatched = 0
+
+        for path, source_name, priority in local_files:
+
+            matched, unmatched = await self.index_file(
+                path,
+                source_name,
+                priority,
+                force=force,
             )
 
-        if norm in self.aliases:
+            total_matched += matched
+            total_unmatched += unmatched
 
-            return (
-                self.aliases[norm],
-                1.0,
+        # ------------------------------------------------------------
+        # REMOTE
+        # ------------------------------------------------------------
+
+        remote_sources = await manager.remote_sources()
+
+        if remote_sources:
+
+            timeout = aiohttp.ClientTimeout(
+                total=40
             )
 
-        best_reference: Optional[str] = None
-        best_score = 0.0
+            async with aiohttp.ClientSession(
+                timeout=timeout
+            ) as session:
 
-        for ref_norm in self.reference_norms:
+                downloader = RemoteDownloader()
 
-            score = SequenceMatcher(
-                None,
-                norm,
-                ref_norm,
-            ).ratio()
+                for source in remote_sources:
 
-            if score > best_score:
+                    downloaded = await downloader.download(
+                        session,
+                        source,
+                    )
 
-                best_score = score
+                    if downloaded:
 
-                best_reference = (
-                    self.norm_to_reference[
-                        ref_norm
-                    ]
-                )
+                        await self.index_file(
+                            downloaded,
+                            source.name,
+                            source.priority,
+                            force=True,
+                        )
 
-        if (
-            best_reference is not None
-            and best_score >= self.threshold
-        ):
-
-            return (
-                best_reference,
-                best_score,
-            )
-
-        return None, best_score
+        logger.info(
+            "Индексирование завершено: matched=%d unmatched=%d",
+            total_matched,
+            total_unmatched,
+        )
 
 
 # ============================================================================
 # VALIDATOR
 # ============================================================================
 
-class StreamValidator:
+class Validator:
 
-    def __init__(self, config: dict):
+    def __init__(
+        self,
+        database: Database,
+    ):
 
-        validation = config["validation"]
-
-        self.http_timeout = int(
-            validation["http_timeout"]
-        )
-
-        self.connect_timeout = int(
-            validation["connect_timeout"]
-        )
-
-        self.read_timeout = int(
-            validation["read_timeout"]
-        )
-
-        self.max_concurrent = int(
-            validation["max_concurrent"]
-        )
-
-        self.chunk_size = int(
-            validation["http_chunk_size"]
-        )
-
-        self.min_bytes = int(
-            validation["min_http_bytes"]
-        )
-
-        self.retries = int(
-            validation["retries"]
-        )
-
-        self.use_ffprobe = bool(
-            validation["validate_with_ffprobe"]
-        )
-
-        self.ffprobe_timeout = int(
-            validation["ffprobe_timeout"]
-        )
+        self.db = database
 
         self.semaphore = asyncio.Semaphore(
-            self.max_concurrent
+            CONFIG["validation"]["max_concurrent"]
         )
 
-        self.ffprobe_available = (
-            shutil.which("ffprobe") is not None
-        )
-
-        if self.use_ffprobe and not self.ffprobe_available:
-
-            logger.warning(
-                "ffprobe не найден. "
-                "Будет использоваться только HTTP-проверка."
-            )
-
-    async def validate(
+    async def check_http(
         self,
         session: aiohttp.ClientSession,
         url: str,
-    ) -> ValidationResult:
+    ) -> Tuple[bool, float]:
 
-        started = time.monotonic()
-
-        async with self.semaphore:
-
-            last_reason = "unknown"
-
-            for attempt in range(
-                self.retries + 1
-            ):
-
-                try:
-
-                    http_ok = await self._validate_http(
-                        session,
-                        url,
-                    )
-
-                    if not http_ok:
-
-                        last_reason = (
-                            "HTTP validation failed"
-                        )
-
-                        if attempt < self.retries:
-                            await asyncio.sleep(
-                                1.0 * (attempt + 1)
-                            )
-                            continue
-
-                        return ValidationResult(
-                            url=url,
-                            valid=False,
-                            http_valid=False,
-                            media_valid=False,
-                            reason=last_reason,
-                            elapsed=(
-                                time.monotonic()
-                                - started
-                            ),
-                        )
-
-                    media_ok = True
-
-                    if (
-                        self.use_ffprobe
-                        and self.ffprobe_available
-                    ):
-
-                        media_ok = await asyncio.to_thread(
-                            self._validate_ffprobe,
-                            url,
-                        )
-
-                    if not media_ok:
-
-                        last_reason = (
-                            "ffprobe validation failed"
-                        )
-
-                        if attempt < self.retries:
-
-                            await asyncio.sleep(
-                                1.0 * (attempt + 1)
-                            )
-
-                            continue
-
-                        return ValidationResult(
-                            url=url,
-                            valid=False,
-                            http_valid=True,
-                            media_valid=False,
-                            reason=last_reason,
-                            elapsed=(
-                                time.monotonic()
-                                - started
-                            ),
-                        )
-
-                    return ValidationResult(
-                        url=url,
-                        valid=True,
-                        http_valid=True,
-                        media_valid=True,
-                        reason="OK",
-                        elapsed=(
-                            time.monotonic()
-                            - started
-                        ),
-                    )
-
-                except Exception as exc:
-
-                    last_reason = str(exc)
-
-                    if attempt < self.retries:
-
-                        await asyncio.sleep(
-                            1.0 * (attempt + 1)
-                        )
-
-            return ValidationResult(
-                url=url,
-                valid=False,
-                http_valid=False,
-                media_valid=False,
-                reason=last_reason,
-                elapsed=(
-                    time.monotonic()
-                    - started
-                ),
-            )
-
-    async def _validate_http(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-    ) -> bool:
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "Chrome/120 Safari/537.36"
-            ),
-            "Range": "bytes=0-8191",
-            "Accept": "*/*",
-            "Connection": "close",
-        }
-
-        timeout = aiohttp.ClientTimeout(
-            total=self.http_timeout,
-            connect=self.connect_timeout,
-            sock_read=self.read_timeout,
-        )
+        start = time.monotonic()
 
         try:
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "Chrome/120 Safari/537.36"
+                ),
+                "Range": "bytes=0-4095",
+            }
+
+            timeout = aiohttp.ClientTimeout(
+                total=CONFIG["validation"]["http_timeout"]
+            )
 
             async with session.get(
                 url,
@@ -1123,378 +1536,359 @@ class StreamValidator:
                 if response.status not in {
                     200,
                     206,
-                    301,
-                    302,
-                    307,
-                    308,
                 }:
-                    return False
+                    return False, time.monotonic() - start
 
-                data = await response.content.read(
-                    self.chunk_size
-                )
+                try:
+                    data = await response.content.read(
+                        4096
+                    )
+                except Exception:
+                    return False, time.monotonic() - start
 
-                if len(data) >= self.min_bytes:
-                    return True
+                elapsed = time.monotonic() - start
 
-                # Некоторые IPTV-сервера не отдают первые
-                # байты обычным HTTP способом.
-                # Если статус корректный и есть данные,
-                # допускаем поток.
-                if len(data) > 0:
-                    return True
+                if len(data) == 0:
+                    return False, elapsed
 
-                return False
+                return True, elapsed
 
         except Exception:
-            return False
 
-    def _validate_ffprobe(
+            return False, time.monotonic() - start
+
+    async def ffprobe(
         self,
         url: str,
     ) -> bool:
 
-        command = [
+        if not CONFIG["validation"]["ffprobe_enabled"]:
+            return True
+
+        timeout = int(
+            CONFIG["validation"]["ffprobe_timeout"]
+        )
+
+        cmd = [
             "ffprobe",
             "-v",
             "error",
+            "-select_streams",
+            "v:0,a:0",
             "-show_entries",
             "stream=codec_type",
             "-of",
             "csv=p=0",
             "-timeout",
-            str(
-                self.ffprobe_timeout
-                * 1_000_000
-            ),
+            str(timeout * 1_000_000),
             url,
         ]
 
         try:
 
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=self.ffprobe_timeout + 3,
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
-            if result.returncode != 0:
+            stdout, _ = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout + 2,
+            )
+
+            if process.returncode != 0:
                 return False
 
-            output = result.stdout.lower()
+            text = stdout.decode(
+                "utf-8",
+                errors="ignore",
+            ).lower()
 
             return (
-                "video" in output
-                or "audio" in output
+                "video" in text
+                or "audio" in text
             )
 
-        except Exception:
+        except asyncio.TimeoutError:
+
+            try:
+                process.kill()
+            except Exception:
+                pass
+
             return False
 
+        except FileNotFoundError:
 
-# ============================================================================
-# PREVIOUS PLAYLIST READER
-# ============================================================================
+            logger.warning(
+                "FFprobe не найден. "
+                "HTTP-проверка продолжает работать."
+            )
 
-def read_previous_playlist(
-    playlist_path: Path,
-) -> Dict[str, str]:
+            return True
 
-    result: Dict[str, str] = {}
+        except Exception:
 
-    if not playlist_path.exists():
-        return result
+            return False
 
-    try:
+    async def validate(
+        self,
+        session: aiohttp.ClientSession,
+        row: dict,
+    ) -> bool:
 
-        text = playlist_path.read_text(
-            encoding="utf-8",
-            errors="ignore",
-        )
+        async with self.semaphore:
 
-    except Exception as exc:
+            url = row["url"]
 
-        logger.warning(
-            "Не удалось прочитать предыдущий playlist: %s",
-            exc,
-        )
+            http_ok, response_time = (
+                await self.check_http(
+                    session,
+                    url,
+                )
+            )
 
-        return result
+            if not http_ok:
 
-    current_name: Optional[str] = None
-
-    for raw_line in text.splitlines():
-
-        line = raw_line.strip()
-
-        if line.startswith("#EXTINF:"):
-
-            comma = line.find(",")
-
-            if comma >= 0:
-                current_name = (
-                    line[comma + 1:].strip()
+                self.db.update_validation(
+                    row["id"],
+                    False,
+                    response_time,
                 )
 
-        elif (
-            current_name
-            and is_stream_url(line)
-        ):
+                return False
 
-            result[current_name] = line
-            current_name = None
-
-    logger.info(
-        "Предыдущий playlist: %d каналов",
-        len(result),
-    )
-
-    return result
-
-
-# ============================================================================
-# PLAYLIST GENERATOR
-# ============================================================================
-
-def build_playlist(
-    reference_names: List[str],
-    selected_urls: Dict[str, str],
-    config: dict,
-) -> str:
-
-    group_title = config["playlist"].get(
-        "group_title",
-        "IPTV",
-    )
-
-    include_group = bool(
-        config["playlist"].get(
-            "include_group",
-            True,
-        )
-    )
-
-    lines: List[str] = [
-        "#EXTM3U"
-    ]
-
-    for reference_name in reference_names:
-
-        url = selected_urls.get(
-            reference_name
-        )
-
-        if not url:
-            raise RuntimeError(
-                f"Нет URL для канала: {reference_name}"
+            media_ok = await self.ffprobe(
+                url
             )
 
-        if include_group:
+            alive = http_ok and media_ok
 
-            lines.append(
-                "#EXTINF:-1 "
-                f'group-title="{group_title}",'
-                f"{reference_name}"
+            self.db.update_validation(
+                row["id"],
+                alive,
+                response_time,
             )
 
-        else:
-
-            lines.append(
-                f"#EXTINF:-1,{reference_name}"
-            )
-
-        lines.append(url)
-
-    return "\n".join(lines) + "\n"
+            return alive
 
 
 # ============================================================================
-# STRICT PLAYLIST CHECK
+# PLAYLIST BUILDER
 # ============================================================================
 
-def extract_playlist_names(
-    playlist_text: str,
-) -> List[str]:
+class PlaylistBuilder:
 
-    names: List[str] = []
-
-    for line in playlist_text.splitlines():
-
-        line = line.strip()
-
-        if not line.startswith(
-            "#EXTINF:"
-        ):
-            continue
-
-        comma = line.find(",")
-
-        if comma < 0:
-            continue
-
-        name = line[
-            comma + 1:
-        ].strip()
-
-        if name:
-            names.append(name)
-
-    return names
-
-
-def verify_playlist_strict(
-    reference_names: List[str],
-    playlist_text: str,
-) -> Tuple[bool, str]:
-
-    reference_norm = [
-        normalize_name(x)
-        for x in reference_names
-    ]
-
-    playlist_names = extract_playlist_names(
-        playlist_text
-    )
-
-    playlist_norm = [
-        normalize_name(x)
-        for x in playlist_names
-    ]
-
-    reference_set = set(
-        reference_norm
-    )
-
-    playlist_set = set(
-        playlist_norm
-    )
-
-    missing = reference_set - playlist_set
-    extra = playlist_set - reference_set
-
-    duplicate_count = (
-        len(playlist_norm)
-        - len(set(playlist_norm))
-    )
-
-    if missing:
-
-        missing_names = [
-            name
-            for name in reference_names
-            if normalize_name(name)
-            in missing
-        ]
-
-        return (
-            False,
-            "Отсутствуют каналы: "
-            + ", ".join(missing_names[:20])
-        )
-
-    if extra:
-
-        extra_names = [
-            name
-            for name in playlist_names
-            if normalize_name(name)
-            in extra
-        ]
-
-        return (
-            False,
-            "Обнаружены лишние каналы: "
-            + ", ".join(extra_names[:20])
-        )
-
-    if duplicate_count > 0:
-
-        return (
-            False,
-            f"Обнаружены дубликаты: "
-            f"{duplicate_count}"
-        )
-
-    if len(reference_names) != len(
-        playlist_names
+    def __init__(
+        self,
+        database: Database,
+        reference_channels: List[ReferenceChannel],
     ):
 
+        self.db = database
+        self.reference_channels = reference_channels
+
+    @staticmethod
+    def escape_m3u(text: str) -> str:
+
         return (
-            False,
-            "Количество каналов не совпадает: "
-            f"reference={len(reference_names)}, "
-            f"playlist={len(playlist_names)}"
+            str(text)
+            .replace("\r", " ")
+            .replace("\n", " ")
         )
 
-    return (
-        True,
-        "OK"
-    )
+    def choose_url(
+        self,
+        channel: ReferenceChannel,
+    ) -> Optional[dict]:
 
+        urls = self.db.get_urls(
+            channel.normalized
+        )
 
-# ============================================================================
-# DIAGNOSTICS
-# ============================================================================
+        if not urls:
+            return None
 
-def save_diagnostics(
-    diagnostics: dict,
-) -> None:
+        # ------------------------------------------------------------
+        # Сначала рабочие.
+        # ------------------------------------------------------------
 
-    try:
+        alive = [
+            row
+            for row in urls
+            if row["is_alive"] == 1
+        ]
 
-        DIAGNOSTIC_FILE.write_text(
-            json.dumps(
-                diagnostics,
-                ensure_ascii=False,
-                indent=2,
-            ),
+        if alive:
+
+            alive.sort(
+                key=lambda row: (
+                    -row["priority"],
+                    -row["success_count"],
+                    row["failure_count"],
+                    row["response_time"]
+                    if row["response_time"] is not None
+                    else 999999,
+                )
+            )
+
+            return alive[0]
+
+        # ------------------------------------------------------------
+        # Рабочий URL не найден.
+        #
+        # Используем последний известный URL.
+        # Это позволяет сохранить канал в плейлисте.
+        # ------------------------------------------------------------
+
+        urls.sort(
+            key=lambda row: (
+                -row["priority"],
+                -row["success_count"],
+                row["failure_count"],
+            )
+        )
+
+        return urls[0]
+
+    async def build(
+        self,
+    ) -> Tuple[int, int, int]:
+
+        lines = [
+            "#EXTM3U",
+            "# IPTV Manager generated playlist",
+            "# Do not edit this file manually.",
+        ]
+
+        total = 0
+        with_url = 0
+        unavailable = 0
+
+        for channel in self.reference_channels:
+
+            if channel.group == "DISABLED":
+                continue
+
+            total += 1
+
+            selected = self.choose_url(
+                channel
+            )
+
+            group = self.escape_m3u(
+                channel.group
+            )
+
+            name = self.escape_m3u(
+                channel.name
+            )
+
+            lines.append(
+                '#EXTINF:-1 group-title="{}",{}'
+                .format(
+                    group,
+                    name,
+                )
+            )
+
+            if selected:
+
+                url = selected["url"]
+
+                lines.append(url)
+
+                with_url += 1
+
+            else:
+
+                unavailable += 1
+
+                unavailable_url = (
+                    CONFIG["output"]
+                    ["unavailable_url"]
+                )
+
+                if CONFIG["output"]["include_unavailable"]:
+
+                    lines.append(
+                        unavailable_url
+                    )
+
+                else:
+
+                    # Этот вариант фактически недостижим,
+                    # поскольку обязательные каналы должны
+                    # оставаться в итоговом списке.
+                    lines.append(
+                        unavailable_url
+                    )
+
+        tmp_path = PLAYLIST_FILE.with_suffix(
+            ".m3u8.tmp"
+        )
+
+        async with aiofiles.open(
+            tmp_path,
+            "w",
             encoding="utf-8",
+        ) as f:
+
+            await f.write(
+                "\n".join(lines)
+                + "\n"
+            )
+
+        os.replace(
+            tmp_path,
+            PLAYLIST_FILE,
         )
 
-    except Exception as exc:
-
-        logger.warning(
-            "Не удалось сохранить диагностику: %s",
-            exc,
+        logger.info(
+            "Плейлист создан: %s",
+            PLAYLIST_FILE,
         )
+
+        logger.info(
+            "Каналов: %d | с URL: %d | "
+            "без найденного URL: %d",
+            total,
+            with_url,
+            unavailable,
+        )
+
+        return total, with_url, unavailable
 
 
 # ============================================================================
-# SOURCE COLLECTION
+# VALIDATION CYCLE
 # ============================================================================
 
-async def collect_candidates(
-    config: dict,
-) -> Dict[str, List[Candidate]]:
+async def validate_all(
+    database: Database,
+    reference_channels: List[ReferenceChannel],
+):
 
-    sources = load_sources_config()
+    if not CONFIG["validation"]["enabled"]:
 
-    local_sources: List[
-        Tuple[str, str, int]
-    ] = []
-
-    if config["sources"].get(
-        "allow_local_files",
-        True,
-    ):
-
-        local_sources = (
-            await load_local_sources()
+        logger.info(
+            "Проверка URL отключена."
         )
 
-    candidates: Dict[
-        str,
-        List[Candidate],
-    ] = {}
+        return
+
+    validator = Validator(
+        database
+    )
 
     timeout = aiohttp.ClientTimeout(
-        total=90
+        total=CONFIG["validation"]["http_timeout"]
     )
 
     connector = aiohttp.TCPConnector(
-        limit=30,
+        limit=CONFIG["validation"]["max_concurrent"] * 2,
+        limit_per_host=10,
         ttl_dns_cache=300,
     )
 
@@ -1503,781 +1897,386 @@ async def collect_candidates(
         connector=connector,
     ) as session:
 
-        downloader = SourceDownloader(
-            config
-        )
-
         tasks = []
 
-        for source in sources:
+        for channel in reference_channels:
 
-            tasks.append(
-                downloader.download(
-                    session,
-                    source,
-                )
+            urls = database.get_urls(
+                channel.normalized
             )
 
-        downloaded = []
-
-        if tasks:
-
-            downloaded = await asyncio.gather(
-                *tasks,
-                return_exceptions=True,
-            )
-
-        source_texts: List[
-            Tuple[str, str, int]
-        ] = []
-
-        for source, result in zip(
-            sources,
-            downloaded,
-        ):
-
-            if isinstance(
-                result,
-                Exception,
-            ):
-                logger.warning(
-                    "Ошибка источника %s: %s",
-                    source.name,
-                    result,
-                )
+            if not urls:
                 continue
 
-            if result:
+            # --------------------------------------------------------
+            # Проверяем несколько URL:
+            #
+            # 1. все URL, которые ещё никогда не проверялись;
+            # 2. лучший рабочий URL;
+            # 3. резервные URL, если у канала нет рабочего.
+            # --------------------------------------------------------
 
-                source_texts.append(
-                    (
-                        source.name,
-                        result,
-                        source.priority,
+            candidates = []
+
+            for row in urls:
+
+                last_checked = row["last_checked"]
+
+                expired = (
+                    last_checked is None
+                    or (
+                        time.time()
+                        - last_checked
+                        > CONFIG["validation"]["cache_ttl"]
                     )
                 )
 
-        source_texts.extend(
-            local_sources
-        )
+                if expired:
+                    candidates.append(row)
 
-        if not source_texts:
-
-            logger.error(
-                "Не удалось получить ни одного источника"
-            )
-
-            return {}
-
-        for (
-            source_name,
-            text,
-            priority,
-        ) in source_texts:
-
-            parsed = M3UParser.parse(
-                text,
-                source_name,
-                priority,
-            )
-
-            logger.info(
-                "Источник %-25s → %d URL",
-                source_name,
-                len(parsed),
-            )
-
-            for candidate in parsed:
-
-                normalized = normalize_name(
-                    candidate.raw_name
-                )
-
-                if not normalized:
-                    continue
-
-                candidates.setdefault(
-                    normalized,
-                    [],
-                ).append(candidate)
-
-    logger.info(
-        "Уникальных названий в источниках: %d",
-        len(candidates),
-    )
-
-    return candidates
-
-
-# ============================================================================
-# MATCH SOURCE CANDIDATES
-# ============================================================================
-
-def match_candidates(
-    raw_candidates: Dict[
-        str,
-        List[Candidate],
-    ],
-    matcher: ChannelMatcher,
-) -> Dict[
-    str,
-    List[Candidate],
-]:
-
-    result: Dict[
-        str,
-        List[Candidate],
-    ] = {}
-
-    matched_count = 0
-    unmatched_count = 0
-
-    for normalized_name, items in raw_candidates.items():
-
-        for candidate in items:
-
-            reference_name, score = matcher.match(
-                candidate.raw_name
-            )
-
-            if not reference_name:
-
-                unmatched_count += 1
-                continue
-
-            candidate.reference_name = (
-                reference_name
-            )
-
-            candidate.match_score = score
-
-            result.setdefault(
-                reference_name,
-                [],
-            ).append(candidate)
-
-            matched_count += 1
-
-    logger.info(
-        "Совпадений URL с эталоном: %d",
-        matched_count,
-    )
-
-    logger.info(
-        "Нераспознанных URL: %d",
-        unmatched_count,
-    )
-
-    return result
-
-
-# ============================================================================
-# DEDUPLICATION
-# ============================================================================
-
-def deduplicate_candidates(
-    candidates: Dict[
-        str,
-        List[Candidate],
-    ],
-) -> None:
-
-    for reference_name in list(
-        candidates.keys()
-    ):
-
-        seen: Set[str] = set()
-        unique: List[Candidate] = []
-
-        for candidate in candidates[
-            reference_name
-        ]:
-
-            url_key = candidate.url.strip()
-
-            if url_key in seen:
-                continue
-
-            seen.add(url_key)
-            unique.append(candidate)
-
-        unique.sort(
-            key=lambda x: (
-                x.source_priority,
-                x.match_score,
-            ),
-            reverse=True,
-        )
-
-        candidates[
-            reference_name
-        ] = unique
-
-
-# ============================================================================
-# VALIDATE ALL CANDIDATES
-# ============================================================================
-
-async def select_working_urls(
-    candidates: Dict[
-        str,
-        List[Candidate],
-    ],
-    reference_names: List[str],
-    validator: StreamValidator,
-) -> Tuple[
-    Dict[str, str],
-    Dict[str, dict],
-]:
-
-    selected: Dict[str, str] = {}
-
-    diagnostics: Dict[str, dict] = {}
-
-    timeout = aiohttp.ClientTimeout(
-        total=20
-    )
-
-    connector = aiohttp.TCPConnector(
-        limit=100,
-        limit_per_host=20,
-        ttl_dns_cache=300,
-        enable_cleanup_closed=True,
-    )
-
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        connector=connector,
-    ) as session:
-
-        tasks = []
-        metadata = []
-
-        for reference_name in reference_names:
-
-            items = candidates.get(
-                reference_name,
-                [],
-            )
-
-            for candidate in items:
+            # Если ничего не требуется проверять,
+            # оставляем кэшированные результаты.
+            for row in candidates:
 
                 tasks.append(
                     validator.validate(
                         session,
-                        candidate.url,
+                        row,
                     )
                 )
-
-                metadata.append(
-                    (
-                        reference_name,
-                        candidate,
-                    )
-                )
-
-        logger.info(
-            "URL на проверку: %d",
-            len(tasks),
-        )
-
-        results = []
 
         if tasks:
+
+            logger.info(
+                "URL на проверку: %d",
+                len(tasks),
+            )
 
             results = await asyncio.gather(
                 *tasks,
                 return_exceptions=True,
             )
 
-        valid_by_channel: Dict[
-            str,
-            List[Tuple[
-                Candidate,
-                ValidationResult,
-            ]],
-        ] = {}
+            success = sum(
+                1
+                for result in results
+                if result is True
+            )
 
-        for (
-            meta,
-            validation,
-        ) in zip(
-            metadata,
-            results,
+            logger.info(
+                "Проверка завершена: успешных=%d/%d",
+                success,
+                len(results),
+            )
+
+    database.commit()
+
+
+# ============================================================================
+# DIAGNOSTICS
+# ============================================================================
+
+def diagnostics(
+    database: Database,
+    reference_channels: List[ReferenceChannel],
+):
+
+    if not CONFIG["diagnostics"]["enabled"]:
+        return
+
+    missing = []
+    no_alive = []
+
+    for channel in reference_channels:
+
+        urls = database.get_urls(
+            channel.normalized
+        )
+
+        if not urls:
+
+            missing.append(channel.name)
+            continue
+
+        if not any(
+            row["is_alive"] == 1
+            for row in urls
         ):
 
-            reference_name, candidate = meta
+            no_alive.append(channel.name)
 
-            if isinstance(
-                validation,
-                Exception,
-            ):
+    stats = database.get_statistics()
 
-                validation = ValidationResult(
-                    url=candidate.url,
-                    valid=False,
-                    http_valid=False,
-                    media_valid=False,
-                    reason=str(validation),
-                    elapsed=0.0,
-                )
+    logger.info(
+        "=== ДИАГНОСТИКА ==="
+    )
 
-            if validation.valid:
+    logger.info(
+        "Обязательных каналов: %d",
+        len(reference_channels),
+    )
 
-                valid_by_channel.setdefault(
-                    reference_name,
-                    [],
-                ).append(
-                    (
-                        candidate,
-                        validation,
-                    )
-                )
+    logger.info(
+        "Каналов с найденными URL: %d",
+        stats["channels"],
+    )
 
-        for reference_name in reference_names:
+    logger.info(
+        "Всего URL: %d",
+        stats["urls"],
+    )
 
-            valid_items = valid_by_channel.get(
-                reference_name,
-                [],
+    logger.info(
+        "Рабочих URL: %d",
+        stats["alive_urls"],
+    )
+
+    logger.info(
+        "Без единого URL: %d",
+        len(missing),
+    )
+
+    logger.info(
+        "Без рабочего URL: %d",
+        len(no_alive),
+    )
+
+    limit = int(
+        CONFIG["diagnostics"]["unmatched_limit"]
+    )
+
+    if missing:
+
+        logger.warning(
+            "Каналы без найденного URL:"
+        )
+
+        for name in missing[:limit]:
+
+            logger.warning(
+                "  ❌ %s",
+                name,
             )
 
-            if not valid_items:
+    if no_alive:
 
-                diagnostics[
-                    reference_name
-                ] = {
-                    "status": "NO_WORKING_URL",
-                    "candidates": len(
-                        candidates.get(
-                            reference_name,
-                            [],
-                        )
-                    ),
-                }
+        logger.warning(
+            "Каналы без рабочего URL:"
+        )
 
-                continue
+        for name in no_alive[:limit]:
 
-            valid_items.sort(
-                key=lambda pair: (
-                    pair[0].source_priority,
-                    pair[0].match_score,
-                ),
-                reverse=True,
+            logger.warning(
+                "  ⚠ %s",
+                name,
             )
 
-            best_candidate = valid_items[0][0]
-
-            selected[
-                reference_name
-            ] = best_candidate.url
-
-            diagnostics[
-                reference_name
-            ] = {
-                "status": "OK",
-                "source": best_candidate.source_name,
-                "priority": best_candidate.source_priority,
-                "url": best_candidate.url,
-                "match_score": round(
-                    best_candidate.match_score,
-                    4,
-                ),
-                "valid_candidates": len(
-                    valid_items
-                ),
-            }
-
-    return selected, diagnostics
+    logger.info(
+        "=== КОНЕЦ ДИАГНОСТИКИ ==="
+    )
 
 
 # ============================================================================
-# MAIN UPDATE
+# MAIN
 # ============================================================================
 
-async def update_playlist() -> bool:
+async def main():
 
-    started = time.monotonic()
+    force_index = (
+        "--force-index"
+        in sys.argv
+    )
 
-    config = load_config()
+    skip_validation = (
+        "--no-validation"
+        in sys.argv
+    )
 
-    logger.info("=" * 80)
-    logger.info("IPTV MANAGER — НАЧАЛО ОБНОВЛЕНИЯ")
-    logger.info("=" * 80)
+    logger.info("=" * 70)
+    logger.info("IPTV MANAGER START")
+    logger.info("=" * 70)
 
-    # ------------------------------------------------------------------------
-    # 1. READ REFERENCE
-    # ------------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # 1. REFERENCE
+    # ------------------------------------------------------------
 
-    reference_names = (
+    reference_channels = (
         await ReferenceParser.parse(
             REFERENCE_FILE
         )
     )
 
-    reference_set = {
-        normalize_name(x)
-        for x in reference_names
-    }
+    # ------------------------------------------------------------
+    # 2. CHANNEL CONFIG
+    # ------------------------------------------------------------
 
-    if len(reference_set) != len(
-        reference_names
-    ):
-
-        raise RuntimeError(
-            "spisok.txt содержит дубликаты "
-            "после нормализации"
-        )
-
-    # ------------------------------------------------------------------------
-    # 2. ALIASES
-    # ------------------------------------------------------------------------
-
-    aliases = {}
-
-    config_aliases = load_yaml(
-        CONFIG_FILE
-    ).get(
-        "aliases",
-        {},
+    channel_config = ChannelConfig(
+        CHANNELS_CONFIG_FILE
     )
 
-    if isinstance(
-        config_aliases,
-        dict,
-    ):
-        aliases = config_aliases
-
-    matcher = ChannelMatcher(
-        reference_names=reference_names,
-        threshold=float(
-            config["matching"][
-                "fuzzy_threshold"
-            ]
-        ),
-        aliases=aliases,
+    channel_config.apply(
+        reference_channels
     )
 
-    # ------------------------------------------------------------------------
-    # 3. LOAD SOURCES
-    # ------------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # 3. ALIASES
+    # ------------------------------------------------------------
 
-    raw_candidates = (
-        await collect_candidates(
-            config
-        )
+    alias_matcher = AliasMatcher(
+        ALIASES_CONFIG_FILE,
+        reference_channels,
     )
 
-    if not raw_candidates:
-
-        raise RuntimeError(
-            "Не удалось загрузить ни одного IPTV-источника"
-        )
-
-    # ------------------------------------------------------------------------
-    # 4. MATCH
-    # ------------------------------------------------------------------------
-
-    matched_candidates = match_candidates(
-        raw_candidates,
-        matcher,
+    matcher = SafeMatcher(
+        reference_channels,
+        alias_matcher,
     )
 
-    deduplicate_candidates(
-        matched_candidates
+    # ------------------------------------------------------------
+    # 4. DATABASE
+    # ------------------------------------------------------------
+
+    db_path_from_config = Path(
+        CONFIG["database"]["path"]
     )
 
-    # ------------------------------------------------------------------------
-    # 5. DIAGNOSTICS BEFORE VALIDATION
-    # ------------------------------------------------------------------------
-
-    missing_from_sources = [
-        name
-        for name in reference_names
-        if name not in matched_candidates
-    ]
-
-    if missing_from_sources:
-
-        logger.error(
-            "Каналы из spisok.txt не найдены в источниках: %d",
-            len(missing_from_sources),
+    if not db_path_from_config.is_absolute():
+        db_path_from_config = (
+            BASE_DIR
+            / db_path_from_config
         )
 
-        for name in missing_from_sources[:50]:
-
-            logger.error(
-                "   ❌ %s",
-                name,
-            )
-
-    # ------------------------------------------------------------------------
-    # 6. VALIDATE
-    # ------------------------------------------------------------------------
-
-    validator = StreamValidator(
-        config
-    )
-
-    selected_urls, diagnostics = (
-        await select_working_urls(
-            matched_candidates,
-            reference_names,
-            validator,
-        )
-    )
-
-    # ------------------------------------------------------------------------
-    # 7. MISSING WORKING URLS
-    # ------------------------------------------------------------------------
-
-    missing_working = [
-        name
-        for name in reference_names
-        if name not in selected_urls
-    ]
-
-    logger.info(
-        "Рабочих каналов: %d/%d",
-        len(selected_urls),
-        len(reference_names),
-    )
-
-    if missing_working:
-
-        logger.error(
-            "=" * 80
-        )
-
-        logger.error(
-            "НОВЫЙ PLAYLIST НЕ БУДЕТ ОПУБЛИКОВАН!"
-        )
-
-        logger.error(
-            "Не найден рабочий URL для %d каналов:",
-            len(missing_working),
-        )
-
-        for name in missing_working:
-
-            logger.error(
-                "   ❌ %s",
-                name,
-            )
-
-        logger.error(
-            "=" * 80
-        )
-
-        diagnostics_summary = {
-            "status": "FAILED",
-            "reason": "missing_working_channels",
-            "reference_count": len(
-                reference_names
-            ),
-            "working_count": len(
-                selected_urls
-            ),
-            "missing_working": missing_working,
-            "elapsed": round(
-                time.monotonic()
-                - started,
-                2,
-            ),
-        }
-
-        save_diagnostics(
-            diagnostics_summary
-        )
-
-        return False
-
-    # ------------------------------------------------------------------------
-    # 8. BUILD PLAYLIST
-    # ------------------------------------------------------------------------
-
-    playlist_text = build_playlist(
-        reference_names,
-        selected_urls,
-        config,
-    )
-
-    # ------------------------------------------------------------------------
-    # 9. STRICT VERIFICATION
-    # ------------------------------------------------------------------------
-
-    strict_ok, strict_message = (
-        verify_playlist_strict(
-            reference_names,
-            playlist_text,
-        )
-    )
-
-    if not strict_ok:
-
-        logger.error(
-            "СТРОГАЯ ПРОВЕРКА PLAYLIST НЕ ПРОЙДЕНА: %s",
-            strict_message,
-        )
-
-        save_diagnostics(
-            {
-                "status": "FAILED",
-                "reason": "strict_playlist_check",
-                "message": strict_message,
-            }
-        )
-
-        return False
-
-    logger.info(
-        "Строгая проверка состава: OK"
-    )
-
-    # ------------------------------------------------------------------------
-    # 10. ATOMIC WRITE
-    # ------------------------------------------------------------------------
-
-    PUBLIC_DIR.mkdir(
+    db_path_from_config.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    temp_file = PLAYLIST_FILE.with_suffix(
-        ".m3u8.tmp"
+    database = Database(
+        db_path_from_config
     )
 
     try:
 
-        temp_file.write_text(
-            playlist_text,
-            encoding="utf-8",
+        # --------------------------------------------------------
+        # 5. INDEX
+        # --------------------------------------------------------
+
+        indexer = Indexer(
+            database,
+            matcher,
         )
 
-        os.replace(
-            temp_file,
+        await indexer.index_all(
+            force=force_index
+        )
+
+        # --------------------------------------------------------
+        # 6. VALIDATION
+        # --------------------------------------------------------
+
+        if skip_validation:
+
+            logger.info(
+                "Валидация отключена параметром."
+            )
+
+        else:
+
+            await validate_all(
+                database,
+                reference_channels,
+            )
+
+        # --------------------------------------------------------
+        # 7. DIAGNOSTICS
+        # --------------------------------------------------------
+
+        diagnostics(
+            database,
+            reference_channels,
+        )
+
+        # --------------------------------------------------------
+        # 8. BUILD PLAYLIST
+        # --------------------------------------------------------
+
+        builder = PlaylistBuilder(
+            database,
+            reference_channels,
+        )
+
+        total, with_url, unavailable = (
+            await builder.build()
+        )
+
+        # --------------------------------------------------------
+        # 9. FINAL CHECK
+        # --------------------------------------------------------
+
+        if total != len(
+            [
+                c
+                for c in reference_channels
+                if c.group != "DISABLED"
+            ]
+        ):
+
+            raise RuntimeError(
+                "КРИТИЧЕСКАЯ ОШИБКА: "
+                "количество каналов в playlist "
+                "не совпадает с эталоном."
+            )
+
+        logger.info("=" * 70)
+
+        logger.info(
+            "ГОТОВО"
+        )
+
+        logger.info(
+            "Обязательных каналов: %d",
+            total,
+        )
+
+        logger.info(
+            "С URL: %d",
+            with_url,
+        )
+
+        logger.info(
+            "Без URL: %d",
+            unavailable,
+        )
+
+        logger.info(
+            "Playlist: %s",
             PLAYLIST_FILE,
         )
 
-    except Exception:
+        logger.info("=" * 70)
 
-        if temp_file.exists():
+    finally:
 
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
-
-        raise
-
-    # ------------------------------------------------------------------------
-    # 11. FINAL FILE VERIFICATION
-    # ------------------------------------------------------------------------
-
-    if not PLAYLIST_FILE.exists():
-
-        raise RuntimeError(
-            "После записи playlist файл отсутствует"
-        )
-
-    final_text = PLAYLIST_FILE.read_text(
-        encoding="utf-8",
-        errors="ignore",
-    )
-
-    final_ok, final_message = (
-        verify_playlist_strict(
-            reference_names,
-            final_text,
-        )
-    )
-
-    if not final_ok:
-
-        raise RuntimeError(
-            "Финальная проверка playlist провалена: "
-            + final_message
-        )
-
-    # ------------------------------------------------------------------------
-    # 12. SAVE DIAGNOSTICS
-    # ------------------------------------------------------------------------
-
-    elapsed = time.monotonic() - started
-
-    diagnostics_output = {
-        "status": "SUCCESS",
-        "reference_count": len(
-            reference_names
-        ),
-        "playlist_count": len(
-            extract_playlist_names(
-                final_text
-            )
-        ),
-        "working_count": len(
-            selected_urls
-        ),
-        "elapsed_seconds": round(
-            elapsed,
-            2,
-        ),
-        "channels": diagnostics,
-    }
-
-    save_diagnostics(
-        diagnostics_output
-    )
-
-    # ------------------------------------------------------------------------
-    # 13. SUMMARY
-    # ------------------------------------------------------------------------
-
-    logger.info("=" * 80)
-    logger.info(
-        "ПЛЕЙЛИСТ УСПЕШНО ОБНОВЛЁН"
-    )
-    logger.info(
-        "Каналов: %d/%d",
-        len(selected_urls),
-        len(reference_names),
-    )
-    logger.info(
-        "Файл: %s",
-        PLAYLIST_FILE,
-    )
-    logger.info(
-        "Время: %.2f сек.",
-        elapsed,
-    )
-    logger.info("=" * 80)
-
-    return True
+        database.close()
 
 
 # ============================================================================
 # ENTRY POINT
 # ============================================================================
 
-def main() -> int:
+if __name__ == "__main__":
 
     try:
 
-        success = asyncio.run(
-            update_playlist()
+        asyncio.run(
+            main()
         )
-
-        if success:
-            return 0
-
-        return 2
 
     except KeyboardInterrupt:
 
         logger.info(
-            "Остановка пользователем"
+            "Остановлено пользователем."
         )
-
-        return 130
 
     except Exception as exc:
 
@@ -2286,11 +2285,4 @@ def main() -> int:
             exc,
         )
 
-        return 1
-
-
-if __name__ == "__main__":
-
-    sys.exit(
-        main()
-    )
+        sys.exit(1)
