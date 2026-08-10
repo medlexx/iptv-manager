@@ -1,0 +1,69 @@
+#EXTM3U
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/602/relaks-fm-relax-fm-908.68ef9992.png", Relaks Fm Relax Fm 908
+https://hls-01-gpm.hostingradio.ru/relaxfm495/playlist.m3u8
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/773/khit-90-kh.e3cedf3a.jpg", Khit 90 Kh
+https://hls-01-hitfm.hostingradio.ru/hit1990/playlist.m3u8
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/R4x4MCTHA6.png", Maksimum 90 Maximum 90S
+https://maximum90.hostingradio.ru/maximum9096.aacp
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/zKak44232R.jpg", Radio Ermitazh 901 Radio Hermitage
+https://hermitage.hostingradio.ru/hermitage128.mp3
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/700/eurodance-90s-dance-anos-90.ad4fd7eb.jpg", Eurodance 90S Dance Anos 90
+https://stream-287.surfernetwork.com/g1u270e2ybruv?zt=eyJhbGciOiJIUzI1NiJ9.eyJzdHJlYW0iOiJnMXUyNzBlMnlicnV2IiwiaG9zdCI6InN0cmVhbS0yODcuc3VyZmVybmV0d29yay5jb20iLCJ0bSI6ZmFsc2UsInJ0dGwiOjUsImp0aSI6Ikp1T0tNT2F0Uy0yc01RbGp1T0d3S3ciLCJpYXQiOjE3ODU4NDAyOTMsImV4cCI6MTc4NTg0MDM1M30.i3RgvXFuL-McVwkEs3eQxgFWlWpu5f-qI5QQSfzSGQg
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/tybbvkqe64tw.png", Pop 90
+https://28503.live.streamtheworld.com/POP90128AAC_SC
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/796/eurodance-90-france.8dcf751a.png", Eurodance 90 France
+https://stream-eurodance90.fr/radio/8000/128.mp3
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/758/eurodance-90.38c2d2f4.png", Eurodance 90
+https://stream-287.surfernetwork.com/zx9h2b61u8quv?zt=eyJhbGciOiJIUzI1NiJ9.eyJzdHJlYW0iOiJ6eDloMmI2MXU4cXV2IiwiaG9zdCI6InN0cmVhbS0yODcuc3VyZmVybmV0d29yay5jb20iLCJ0bSI6ZmFsc2UsInJ0dGwiOjUsImp0aSI6Ikg4N2FsUk5IVGIyd2JyaC12Q3ZWMHciLCJpYXQiOjE3ODU4NDAzMTcsImV4cCI6MTc4NTg0MDM3N30.a_xTwFPaHq8S6nrMBY6ncjy_TdwO0vybbgS66yI54Zo
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/yyKNLHvX5d.png", Nostalgie 90
+https://n15-eu.rcs.revma.com/wq4dq533ehuvv?rj-ttl=5&rj-tok=AAABn8xp8EcASuuX5uVP_45r9g
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/559/cherie-90.101d4e9d.jpg", Cherie 90
+https://streaming.nrjaudio.fm/ou6p4cxp336f?aw_0_1st.station=CHERIE-90-S&origine=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/764/senal-90.cf21e07c.png", Senal 90
+https://s2.yesstreaming.net:17042/stream
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/aylvetmqazhk.png", 90 Fm
+https://stream.itv.az/rtmp:/radio/playlist.m3u8
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/292/nostalgie-best-of-90s.3ca83c89.png", Nostalgie Best Of 90S
+https://streaming.nrjaudio.fm/ousg2xm4z85f?aw_0_1st.station=Nostalgie-Best-Of-90&origine=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/424/generations-90.cfe96817.png", Generations 90
+https://generations-90.ice.infomaniak.ch/generations-90.aac
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/997/radio-mir-radio-mir.80d7eb1a.png", Radio Mir Radio Mir
+https://icecast-mirtv.cdnvideo.ru/radio_mir_256
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/672/love-90s-portugal.6f1135d3.png", Love 90S Portugal
+https://stream-288.surfernetwork.com/uierv6xfiqfuv?zt=eyJhbGciOiJIUzI1NiJ9.eyJzdHJlYW0iOiJ1aWVydjZ4ZmlxZnV2IiwiaG9zdCI6InN0cmVhbS0yODguc3VyZmVybmV0d29yay5jb20iLCJ0bSI6ZmFsc2UsInJ0dGwiOjUsImp0aSI6IkZZQ210cTJoVFUyWHlWdHZmQUtmS1EiLCJpYXQiOjE3ODU4NDAzODEsImV4cCI6MTc4NTg0MDQ0MX0.MJAzPOZAbaYEXYdNhQcG9qCRCPP4Ac8JJG0mUHvVwUA
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/fcpzfxugbhsp.jpg", Skylos 90 Fm
+https://n0e.radiojar.com/819r8wupdrruv?rj-ttl=5&rj-tok=AAABn8xq6ckAMfh8dBKpR5Muqw
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/t8yaUYuCRa.png", Play 90S
+https://live.playradio.org:8443/90HD
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/965/salsa-brutal.d47640d9.jpg", Salsa Brutal
+https://streaming.grupomediosdelnorte.com:8010/stream
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/521/90s-hits.6b6a632a.jpg", 90S Hits
+https://live-bauerdk.sharp-stream.com/DK_HQ_RP06.aac
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/680/dance-90.5d5df4de.png", Dance 90
+https://stream-289.surfernetwork.com/kf6z0d2t5tzuv?zt=eyJhbGciOiJIUzI1NiJ9.eyJzdHJlYW0iOiJrZjZ6MGQydDV0enV2IiwiaG9zdCI6InN0cmVhbS0yODkuc3VyZmVybmV0d29yay5jb20iLCJ0bSI6ZmFsc2UsInJ0dGwiOjUsImp0aSI6Ik1FVG9OY2FYUW15VXFZTWlSR2VBcVEiLCJpYXQiOjE3ODU4NDA0MTUsImV4cCI6MTc4NTg0MDQ3NX0.NWXyITA6oHfR8F6dzemRhAG1UTMT-3IRTPNiLYQuGaQ
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/304/nostalgie-best-of-80s-90s.bc656656.jpg", Nostalgie Best Of 80S 90S
+https://streaming.nrjaudio.fm/ou62iyxp336f?aw_0_1st.station=Nostalgie-80-90&origine=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/155/gotradio-90s.1780ee81.jpg", Gotradio 90S
+https://pureplay.cdnstream1.com/6052_128.mp3?aw_0_1st.playerid=esPlayer&aw_0_1st.skey=1661513156&listenerId=esAdblock0655531
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/175/nrj-dance-90.cb81ad24.jpg", Nrj Dance 90
+https://streaming.nrjaudio.fm/ouwgqgsk6j4d?aw_0_1st.station=NRJ-Dance-90&origine=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/625/vox-disco-90.d81ff426.jpg", Vox Disco 90
+https://ic1.smcdn.pl/6170-1.aac
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/811/vinilo.bf3f7a6d.png", Vinilo
+https://audiopanel.com.ar:8010/radio.aac
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/641/m80-90s.543d42a0.png", M80 90S
+https://stream-icy.bauermedia.pt/m8090.aac
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/Hm5GsX2U43.png", Nostalgie Dance 90
+https://n04-eu.rcs.revma.com/54xm7543ehuvv?rj-ttl=5&rj-tok=AAABn8xr91YAeP0wXFxP_S6F0g
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/511/radio-90-hit.000489ec.png", Radio 90 Hit
+https://live.90hit.ro:8000/radio.mp3
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/148/nrj-hits-90.254cf946.jpg", Nrj Hits 90
+https://streaming.nrjaudio.fm/ou627gxp336f?aw_0_1st.station=NRJ-Hits-90&origine=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/738/portal-90-radio.0eed23b1.png", Portal 90 Radio
+https://sonic.mallocohosting.cl/8046/stream
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/704/538-90s.ca8a7090.png", 538 90S
+https://28973.live.streamtheworld.com/TLPSTR21_SC?dist=mytuner
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/950/kek-duna-radio-gold.46c7e962.png", Kek Duna Radio Gold
+https://mediagw.e-tiger.net/stream/zc05
+#EXTINF:-1 group-title="Радио" tvg-logo="https://static2.mytuner.mobi/media/tvos_radios/694/kink90s.9bbf163b.png", Kink90S
+https://25233.live.streamtheworld.com/KINK_90SAAC.aac
