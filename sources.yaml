@@ -36,6 +36,6 @@ sources:
   
   # - name: "remote_source_1"
   #   type: "remote"
-  #   url: "https://homtv.ru/8124907.m3u"
+  #   url: " "
   #   priority: 100
   #   enabled: true
