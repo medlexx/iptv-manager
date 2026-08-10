@@ -3,6 +3,7 @@
 
 """
 IPTV Manager — production version compatible with structured config.yaml.
+Optimized for ultra-fast matching of large M3U playlists.
 """
 
 from __future__ import annotations
@@ -140,7 +141,6 @@ def load_config() -> dict:
     data = load_yaml(path, {})
 
     if isinstance(data, dict):
-        # Маппинг вложенного YAML в плоские параметры скрипта
         if "sources" in data and isinstance(data["sources"], dict):
             src = data["sources"]
             if "local_directory" in src:
@@ -250,13 +250,9 @@ class ReferenceParser:
         with path.open("r", encoding="utf-8-sig", errors="replace") as f:
             for raw in f:
                 line = clean_text(raw)
-                if not line:
+                if not line or line.startswith(("#", ";")):
                     continue
-                if line.startswith(("#", ";")):
-                    continue
-                if cls.NUMBER.fullmatch(line):
-                    continue
-                if cls.DURATION.fullmatch(line):
+                if cls.NUMBER.fullmatch(line) or cls.DURATION.fullmatch(line):
                     continue
                 if re.match(r"^(https?|rtmp|rtsp|udp)://", line, re.I):
                     continue
@@ -302,7 +298,7 @@ class AliasManager:
 
 
 # ============================================================================
-# MATCHER
+# ОПТИМИЗИРОВАННЫЙ MATCHER И BUILD_CANDIDATES
 # ============================================================================
 
 @dataclass
@@ -329,44 +325,61 @@ class ChannelMatcher:
             x: tokens(x) for x in self.references
         }
 
+        # Быстрый индекс токенов для отсечения заведомо чужих каналов
+        self.token_to_refs: Dict[str, Set[str]] = {}
+        for ref in self.references:
+            for t in self.ref_tokens[ref]:
+                self.token_to_refs.setdefault(t, set()).add(ref)
+
     def match(self, source_name: str) -> Optional[Match]:
         norm = normalize_name(source_name)
         if not norm:
             return None
 
+        # 1. Точное совпадение (O(1))
         if norm in self.norm_map:
             return Match(self.norm_map[norm], 1.0, "exact")
 
+        # 2. Псевдоним (O(1))
         alias = self.aliases.lookup(source_name)
         if alias:
             alias_norm = normalize_name(alias)
             if alias_norm in self.norm_map:
                 return Match(self.norm_map[alias_norm], 1.0, "alias")
 
-        if len(norm) < 4:
+        if len(norm) < 3:
+            return None
+
+        source_toks = tokens(source_name)
+        if not source_toks:
+            return None
+
+        # 3. Отбор кандидатов по пересечению слов
+        candidate_refs: Set[str] = set()
+        for t in source_toks:
+            if t in self.token_to_refs:
+                candidate_refs.update(self.token_to_refs[t])
+
+        if not candidate_refs:
             return None
 
         best: Optional[Match] = None
-        source_tokens = tokens(source_name)
 
-        for ref in self.references:
+        # 4. Проверка SequenceMatcher ТОЛЬКО для потенциально подходящих названий
+        for ref in candidate_refs:
             ref_norm = normalize_name(ref)
             if not ref_norm:
                 continue
 
+            ref_toks = self.ref_tokens[ref]
+            union = len(source_toks | ref_toks)
+            token_score = (len(source_toks & ref_toks) / union) if union else 0.0
+
+            if token_score < 0.2 and len(norm) > 5 and len(ref_norm) > 5:
+                continue
+
             ratio = SequenceMatcher(None, norm, ref_norm).ratio()
-            ref_tokens = self.ref_tokens[ref]
-
-            token_score = 0.0
-            if source_tokens and ref_tokens:
-                union = len(source_tokens | ref_tokens)
-                if union:
-                    token_score = len(source_tokens & ref_tokens) / union
-
-            score = max(
-                ratio,
-                ratio * 0.70 + token_score * 0.30,
-            )
+            score = max(ratio, ratio * 0.70 + token_score * 0.30)
 
             if best is None or score > best.score:
                 best = Match(ref, score, "fuzzy")
@@ -375,6 +388,72 @@ class ChannelMatcher:
             return best
 
         return None
+
+
+@dataclass
+class Candidate:
+    channel: str
+    url: str
+    source: str
+    priority: int
+    score: float
+    method: str
+
+
+def build_candidates(
+    entries: Sequence[SourceEntry],
+    matcher: ChannelMatcher,
+    max_per_channel: int = 5,
+) -> Dict[str, List[Candidate]]:
+    result: Dict[str, List[Candidate]] = {}
+    unmatched = 0
+
+    for entry in entries:
+        match = matcher.match(entry.name)
+        if not match:
+            unmatched += 1
+            continue
+
+        result.setdefault(match.reference, []).append(
+            Candidate(
+                match.reference,
+                entry.url,
+                entry.source,
+                entry.priority,
+                match.score,
+                match.method,
+            )
+        )
+
+    for channel in result:
+        unique: Dict[str, Candidate] = {}
+
+        for candidate in result[channel]:
+            old = unique.get(candidate.url)
+            if old is None or (
+                candidate.priority,
+                candidate.score,
+            ) > (
+                old.priority,
+                old.score,
+            ):
+                unique[candidate.url] = candidate
+
+        sorted_candidates = sorted(
+            unique.values(),
+            key=lambda x: (x.priority, x.score),
+            reverse=True,
+        )
+        result[channel] = sorted_candidates[:max_per_channel]
+
+    logger.info(
+        "Совпало обязательных каналов: %d; "
+        "нераспознано записей источников: %d",
+        len(result),
+        unmatched,
+    )
+
+    return result
 
 
 # ============================================================================
@@ -626,34 +705,21 @@ class SourceLoader:
                 allow_redirects=True,
             ) as response:
                 if response.status != 200:
-                    logger.warning(
-                        "%s: HTTP %s",
-                        item.name,
-                        response.status,
-                    )
+                    logger.warning("%s: HTTP %s", item.name, response.status)
                     return []
 
                 data = await response.read()
                 text = data.decode("utf-8", errors="replace")
 
                 try:
-                    cache_path.write_text(
-                        text,
-                        encoding="utf-8",
-                    )
+                    cache_path.write_text(text, encoding="utf-8")
                 except Exception:
                     pass
 
-                return M3UParser.parse(
-                    text, item.name, item.priority
-                )
+                return M3UParser.parse(text, item.name, item.priority)
 
         except Exception as exc:
-            logger.warning(
-                "Не удалось скачать %s: %s",
-                item.name,
-                exc,
-            )
+            logger.warning("Не удалось скачать %s: %s", item.name, exc)
 
             if cache_path.exists():
                 try:
@@ -661,9 +727,7 @@ class SourceLoader:
                         encoding="utf-8",
                         errors="replace",
                     )
-                    return M3UParser.parse(
-                        text, item.name, item.priority
-                    )
+                    return M3UParser.parse(text, item.name, item.priority)
                 except Exception:
                     pass
 
@@ -683,55 +747,36 @@ class Database:
 
     def _open(self) -> None:
         try:
-            self.conn = sqlite3.connect(
-                str(self.path),
-                timeout=30,
-            )
+            self.conn = sqlite3.connect(str(self.path), timeout=30)
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self._tables()
         except sqlite3.DatabaseError as exc:
-            logger.error(
-                "Файл %s не является корректной SQLite БД: %s",
-                self.path,
-                exc,
-            )
+            logger.error("Файл %s поврежден БД: %s", self.path, exc)
 
-            try:
-                if self.conn:
+            if self.conn:
+                try:
                     self.conn.close()
-            except Exception:
-                pass
-
+                except Exception:
+                    pass
             self.conn = None
 
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            corrupt = self.path.with_name(
-                f"{self.path.name}.corrupt-{stamp}"
-            )
+            corrupt = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
 
             try:
                 if self.path.exists():
                     shutil.move(str(self.path), str(corrupt))
-                    logger.warning(
-                        "Повреждённая БД перемещена: %s",
-                        corrupt,
-                    )
             except Exception:
                 try:
                     self.path.unlink(missing_ok=True)
                 except Exception:
                     pass
 
-            self.conn = sqlite3.connect(
-                str(self.path),
-                timeout=30,
-            )
+            self.conn = sqlite3.connect(str(self.path), timeout=30)
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self._tables()
-
-            logger.info("Создана новая SQLite БД: %s", self.path)
 
     def _tables(self) -> None:
         assert self.conn is not None
@@ -754,70 +799,46 @@ class Database:
         )
         self.conn.commit()
 
-    def validation(
-        self,
-        url: str,
-        ttl: int,
-    ) -> Optional[bool]:
+    def validation(self, url: str, ttl: int) -> Optional[bool]:
         assert self.conn is not None
         row = self.conn.execute(
             "SELECT valid, checked_at FROM validation WHERE url=?",
             (url,),
         ).fetchone()
 
-        if not row:
-            return None
-
-        if time.time() - row[1] > ttl:
+        if not row or time.time() - row[1] > ttl:
             return None
 
         return bool(row[0])
 
-    def set_validation(
-        self,
-        url: str,
-        valid: bool,
-    ) -> None:
+    def set_validation(self, url: str, valid: bool) -> None:
         assert self.conn is not None
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO validation
-            (url, valid, checked_at)
+            INSERT OR REPLACE INTO validation (url, valid, checked_at)
             VALUES (?, ?, ?)
             """,
             (url, int(valid), time.time()),
         )
         self.conn.commit()
 
-    def last_good(
-        self,
-        channel: str,
-        ttl: int,
-    ) -> Optional[Tuple[str, str, int]]:
+    def last_good(self, channel: str, ttl: int) -> Optional[Tuple[str, str, int]]:
         assert self.conn is not None
         row = self.conn.execute(
             """
             SELECT url, source, priority, checked_at
-            FROM last_good
-            WHERE channel=?
+            FROM last_good WHERE channel=?
             """,
             (channel,),
         ).fetchone()
 
-        if not row:
-            return None
-
-        if time.time() - row[3] > ttl:
+        if not row or time.time() - row[3] > ttl:
             return None
 
         return row[0], row[1], int(row[2])
 
     def set_last_good(
-        self,
-        channel: str,
-        url: str,
-        source: str,
-        priority: int,
+        self, channel: str, url: str, source: str, priority: int
     ) -> None:
         assert self.conn is not None
         self.conn.execute(
@@ -844,20 +865,12 @@ class Database:
 # ============================================================================
 
 class Validator:
-    def __init__(
-        self,
-        config: dict,
-        database: Database,
-    ):
+    def __init__(self, config: dict, database: Database):
         self.config = config
         self.db = database
-        self.sem = asyncio.Semaphore(
-            int(config["max_concurrent_validation"])
-        )
+        self.sem = asyncio.Semaphore(int(config["max_concurrent_validation"]))
         self.ffprobe = (
-            self._has_ffprobe()
-            if config["use_ffprobe"]
-            else False
+            self._has_ffprobe() if config["use_ffprobe"] else False
         )
 
     @staticmethod
@@ -870,16 +883,10 @@ class Validator:
                 timeout=5,
             ).returncode == 0
         except Exception:
-            logger.warning(
-                "FFprobe не найден. Используется HTTP-проверка."
-            )
+            logger.warning("FFprobe не найден. Используется HTTP-проверка.")
             return False
 
-    async def _http(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-    ) -> bool:
+    async def _http(self, session: aiohttp.ClientSession, url: str) -> bool:
         try:
             timeout = aiohttp.ClientTimeout(
                 total=int(self.config["http_timeout"]),
@@ -901,17 +908,11 @@ class Validator:
                     return False
 
                 content = await response.content.read(16384)
-                content_type = response.headers.get(
-                    "Content-Type", ""
-                ).lower()
+                content_type = response.headers.get("Content-Type", "").lower()
 
                 return bool(content) or "mpegurl" in content_type
 
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientError,
-            OSError,
-        ):
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
             return False
 
     def _probe(self, url: str) -> bool:
@@ -920,10 +921,8 @@ class Validator:
             "-v", "error",
             "-show_entries", "stream=codec_type",
             "-of", "csv=p=0",
-            "-timeout",
-            str(int(self.config["ffprobe_timeout"]) * 1000000),
-            "-user_agent",
-            self.config["user_agent"],
+            "-timeout", str(int(self.config["ffprobe_timeout"]) * 1000000),
+            "-user_agent", self.config["user_agent"],
             url,
         ]
 
@@ -940,14 +939,9 @@ class Validator:
         except Exception:
             return False
 
-    async def check(
-        self,
-        session: aiohttp.ClientSession,
-        url: str,
-    ) -> bool:
+    async def check(self, session: aiohttp.ClientSession, url: str) -> bool:
         cached = self.db.validation(
-            url,
-            int(self.config["cache_ttl_seconds"]),
+            url, int(self.config["cache_ttl_seconds"])
         )
         if cached is not None:
             return cached
@@ -961,82 +955,9 @@ class Validator:
                 self.db.set_validation(url, True)
                 return True
 
-            valid = await asyncio.to_thread(
-                self._probe,
-                url,
-            )
+            valid = await asyncio.to_thread(self._probe, url)
             self.db.set_validation(url, valid)
             return valid
-
-
-# ============================================================================
-# CANDIDATES
-# ============================================================================
-
-@dataclass
-class Candidate:
-    channel: str
-    url: str
-    source: str
-    priority: int
-    score: float
-    method: str
-
-
-def build_candidates(
-    entries: Sequence[SourceEntry],
-    matcher: ChannelMatcher,
-    max_per_channel: int = 5,
-) -> Dict[str, List[Candidate]]:
-    result: Dict[str, List[Candidate]] = {}
-    unmatched = 0
-
-    for entry in entries:
-        match = matcher.match(entry.name)
-        if not match:
-            unmatched += 1
-            continue
-
-        result.setdefault(match.reference, []).append(
-            Candidate(
-                match.reference,
-                entry.url,
-                entry.source,
-                entry.priority,
-                match.score,
-                match.method,
-            )
-        )
-
-    for channel in result:
-        unique: Dict[str, Candidate] = {}
-
-        for candidate in result[channel]:
-            old = unique.get(candidate.url)
-            if old is None or (
-                candidate.priority,
-                candidate.score,
-            ) > (
-                old.priority,
-                old.score,
-            ):
-                unique[candidate.url] = candidate
-
-        sorted_candidates = sorted(
-            unique.values(),
-            key=lambda x: (x.priority, x.score),
-            reverse=True,
-        )
-        result[channel] = sorted_candidates[:max_per_channel]
-
-    logger.info(
-        "Совпало обязательных каналов: %d; "
-        "нераспознано записей источников: %d",
-        len(result),
-        unmatched,
-    )
-
-    return result
 
 
 # ============================================================================
@@ -1067,10 +988,7 @@ async def resolve_channels(
 
         async def resolve(channel: str):
             for candidate in candidates.get(channel, []):
-                if await validator.check(
-                    session,
-                    candidate.url,
-                ):
+                if await validator.check(session, candidate.url):
                     db.set_last_good(
                         channel,
                         candidate.url,
@@ -1081,8 +999,7 @@ async def resolve_channels(
 
             if config["keep_last_good_url"]:
                 old = db.last_good(
-                    channel,
-                    int(config["good_url_ttl_seconds"]),
+                    channel, int(config["good_url_ttl_seconds"])
                 )
 
                 if old:
@@ -1091,12 +1008,7 @@ async def resolve_channels(
                         return (
                             channel,
                             Candidate(
-                                channel,
-                                url,
-                                source,
-                                priority,
-                                1.0,
-                                "last_good",
+                                channel, url, source, priority, 1.0, "last_good"
                             ),
                         )
 
