@@ -1,6 +1,241 @@
-Ниже чистый список названий по одному в строке без запятых и точек. В него включены кинозалы BCU VF Premiumgroup KBC CineMan MM Yosso Magic Fresh Liberty TOP Sky High KLI и BOX из опубликованных перечней IPTV [tv-ch](https://tv-ch.ru/cinemas-sharavoz-tv-ru/)
-
-```text
+Кинопремьера HD
+Кинопремиум HD
+Кинохит HD
+Киномикс HD
+Киносвидание HD
+Киносемья HD
+Кинокомедия HD
+Кино ТВ
+Кино ТВ HD
+Кинопоказ HD
+Кинопоказ HD 1
+Кинопоказ HD 2
+Киноужас HD
+Киносерия HD
+КиноМикс
+КиноСемья
+КиноСвидание
+КиноКомедия
+КиноПремьера
+КиноПремиум
+Наше новое кино
+Наше новое кино HD
+Наше любимое кино
+Наше любимое кино HD
+Наше крутое кино
+Наше крутое кино HD
+Наше кино
+Наше кино HD
+Наш роман
+Наш роман HD
+Родное кино
+Любимое кино
+Душевное кино HD
+Мужское кино
+Мужское кино HD
+Остросюжетное HD
+Страшное HD
+Премиальное HD
+Комедийное HD
+Романтичное HD
+Эгоист HD
+Дом кино
+Дом кино HD
+Дом кино Премиум
+Дом кино Премиум HD
+Русский роман
+Русский роман HD
+Русский бестселлер
+Русский бестселлер HD
+Русский иллюзион
+Русский иллюзион HD
+Иллюзион плюс
+Иллюзион плюс HD
+Русская комедия
+Русская комедия HD
+Русский детектив
+Русский детектив HD
+Русский экшн
+Русский экшн HD
+Русский сериал
+Русский сериал HD
+Viju Premiere
+Viju Premiere HD
+Viju Megahit
+Viju Megahit HD
+Viju Comedy
+Viju Comedy HD
+Viju Serial
+Viju Serial HD
+Viju TV1000
+Viju TV1000 HD
+Viju TV1000 Action
+Viju TV1000 Action HD
+Viju TV1000 Русское кино
+Viju TV1000 Русское кино HD
+Viasat Kino
+Viasat Kino HD
+Viasat Kino Action
+Viasat Kino Action HD
+Viasat Kino Comedy
+Viasat Kino Comedy HD
+Viasat Kino Megahit
+Viasat Kino Megahit HD
+Viasat Kino World
+TV1000
+TV1000 HD
+TV1000 Action
+TV1000 Action HD
+TV1000 Русское кино
+TV1000 Русское кино HD
+TV1000 World
+TV1000 World HD
+Amedia Premium
+Amedia Premium HD
+Amedia Hit
+Amedia Hit HD
+Amedia 1
+Amedia 1 HD
+Amedia 2
+Amedia 2 HD
+Amedia HBO
+Amedia HBO HD
+TV XXI
+TV XXI HD
+Еврокино
+Еврокино HD
+Мосфильм
+Мосфильм HD
+Мосфильм Золотая коллекция
+Мосфильм Золотая коллекция HD
+Победа
+Победа HD
+Советское кино
+Советское кино HD
+СССР
+СССР HD
+Ретро
+Ретро HD
+Ностальгия
+Ностальгия HD
+Классика кино
+Классика кино HD
+Зарубежное кино
+Зарубежное кино HD
+Модное кино
+Модное кино HD
+Премьера
+Премьера HD
+Премиум кино
+Премиум кино HD
+Кинохит
+Кинохит HD
+Комедия
+Комедия HD
+Комедия ВГТРК
+Комедия ВГТРК HD
+Триллер
+Триллер HD
+Фантастика
+Фантастика HD
+Боевик
+Боевик HD
+Детектив
+Детектив HD
+Драма
+Драма HD
+Мелодрама
+Мелодрама HD
+Приключения
+Приключения HD
+Фильм
+Фильм HD
+Cinema
+Cinema HD
+Cinema Ultra
+Cinema 4K
+AMC
+AMC HD
+Fox
+Fox HD
+Fox Life
+Fox Life HD
+Paramount Channel
+Paramount Channel HD
+Paramount Comedy
+Paramount Comedy HD
+Sony Sci Fi
+Sony Sci Fi HD
+Sony Turbo
+Sony Turbo HD
+Sony Entertainment Television
+Sony Entertainment Television HD
+MGM
+MGM HD
+Go3 Films
+Go3 Films HD
+Bollywood
+Bollywood HD
+Индийское кино
+Индийское кино HD
+Zee TV
+Zee TV HD
+Кино Азия
+Кино Азия HD
+Корейское кино
+Корейское кино HD
+Аниме
+Аниме HD
+Мультфильмы
+Мультфильмы HD
+Сериал
+Сериал HD
+Сериалы
+Сериалы HD
+НТВ Сериал
+НТВ Сериал HD
+НТВ Хит
+НТВ Хит HD
+НТВ Право
+НТВ Право HD
+ТВ3
+ТВ3 HD
+Пятница
+Пятница HD
+СТС
+СТС HD
+ТНТ
+ТНТ HD
+ТНТ4
+ТНТ4 HD
+Парамаунт Комеди
+Парамаунт Комеди HD
+Comedy Central
+Comedy Central HD
+Домашний
+Домашний HD
+Ю
+Ю HD
+Суббота
+Суббота HD
+Пятый канал
+Пятый канал HD
+Первый канал
+Первый канал HD
+Россия 1
+Россия 1 HD
+Россия 2
+Россия 2 HD
+Россия К
+Россия К HD
+Россия Культура
+Россия Культура HD
+Звезда
+Звезда HD
+ОТР
+ОТР HD
+Пятый канал Петербург
+Пятый канал Петербург HD
 BCU Action HD
 BCU Catastrophe HD
 BCU Cinema HD
@@ -573,4 +808,3 @@ VeleS Вестерн
 VeleS Наше Кино
 VeleS Гоблин
 VeleS Новогодний
-```
