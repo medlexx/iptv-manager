@@ -9,8 +9,10 @@ import logging
 from pathlib import Path
 
 # ==========================================
-# Настройка путей и логирования
+# Настройки приложения
 # ==========================================
+MAX_LINKS_PER_CHANNEL = 3  # Ограничение: не более 3 лучших ссылок на канал
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
@@ -49,7 +51,8 @@ def get_db_connection(db_file: Path) -> sqlite3.Connection:
             return conn
         except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
             logging.warning(f"Файл БД {db_file} поврежден ({e}). Пересоздаем...")
-            conn.close() if 'conn' in locals() else None
+            if 'conn' in locals() and conn:
+                conn.close()
             try:
                 os.remove(db_file)
             except OSError:
@@ -125,7 +128,6 @@ def main():
     logging.info(f"Источников для обработки: {len(source_files)}")
 
     total_m3u_records = 0
-    matched_count = 0
     unrecognized_count = 0
 
     valid_matches = []  # Хранилище кортежей (extinf, url)
@@ -169,7 +171,7 @@ def main():
 
     logging.info(f"Всего записей M3U: {total_m3u_records}")
 
-    # 4. Сохранение в БД и сборка итогового плейлиста
+    # 4. Сохранение в БД и группировка
     matched_channels_set = set()
 
     try:
@@ -191,20 +193,34 @@ def main():
             f"нераспознано записей источников: {unrecognized_count}"
         )
 
-        # 5. Запись итогового M3U8 плейлиста
+        # 5. Запись итогового M3U8 плейлиста (с ограничением до 3 ссылок на канал)
+        total_links_written = 0
         with open(OUTPUT_PLAYLIST, "w", encoding="utf-8") as out:
             out.write("#EXTM3U\n")
-            cursor.execute("SELECT extinf, url FROM matches")
-            for extinf, url in cursor.fetchall():
-                out.write(f"{extinf}\n{url}\n")
+            
+            # Для каждого обязательного канала достаем не более MAX_LINKS_PER_CHANNEL ссылок
+            for channel in required_channels:
+                cursor.execute(
+                    "SELECT extinf, url FROM matches WHERE channel_name = ? LIMIT ?",
+                    (channel, MAX_LINKS_PER_CHANNEL)
+                )
+                rows = cursor.fetchall()
+                for extinf, url in rows:
+                    out.write(f"{extinf}\n{url}\n")
+                    total_links_written += 1
 
-        logging.info(f"Плейлист успешно записан в: {OUTPUT_PLAYLIST}")
+        logging.info(
+            f"Плейлист успешно записан в: {OUTPUT_PLAYLIST} "
+            f"(Всего ссылок записано: {total_links_written}, максимум по {MAX_LINKS_PER_CHANNEL} на канал)"
+        )
 
         # 6. Запись отчета
         with open(REPORT_FILE, "w", encoding="utf-8") as rep:
             rep.write(f"Обязательных каналов: {len(required_channels)}\n")
             rep.write(f"Обработано M3U записей: {total_m3u_records}\n")
             rep.write(f"Найдено уникальных каналов: {matched_count}\n")
+            rep.write(f"Записано ссылок в плейлист: {total_links_written}\n")
+            rep.write(f"Ограничение ссылок на канал: {MAX_LINKS_PER_CHANNEL}\n")
             rep.write(f"Нераспознано записей: {unrecognized_count}\n")
 
         logging.info(f"Отчет сохранен в: {REPORT_FILE}")
