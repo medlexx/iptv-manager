@@ -1,0 +1,11 @@
+channel
+source
+source_file
+url
+priority
+last_seen
+last_checked
+is_alive
+response_time
+failure_count
+success_count
