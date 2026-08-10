@@ -1,12 +1,10 @@
 name: Update IPTV Playlist
 
 on:
-
   # Ручной запуск из GitHub Actions.
   workflow_dispatch:
 
-  # Автоматический запуск.
-  # GitHub использует UTC.
+  # Автоматический запуск каждые 30 минут (UTC).
   schedule:
     - cron: "*/30 * * * *"
 
@@ -23,31 +21,24 @@ on:
       - "sources/**"
       - "requirements.txt"
 
-
 permissions:
   contents: write
-
 
 concurrency:
   group: iptv-playlist-update
   cancel-in-progress: true
 
-
 jobs:
-
   update:
-
     runs-on: ubuntu-latest
 
     steps:
-
       # ========================================================
       # CHECKOUT
       # ========================================================
 
       - name: Checkout repository
         uses: actions/checkout@v6
-
 
       # ========================================================
       # PYTHON
@@ -59,7 +50,6 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-
       # ========================================================
       # FFMPEG / FFPROBE
       # ========================================================
@@ -68,7 +58,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-
 
       # ========================================================
       # PYTHON DEPENDENCIES
@@ -79,9 +68,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-
       # ========================================================
-      # CREATE DIRECTORIES
+      # CREATE DIRECTORIES & CLEAN OLD TEMP DB
       # ========================================================
 
       - name: Prepare directories
@@ -89,8 +77,9 @@ jobs:
           mkdir -p data
           mkdir -p output
           mkdir -p logs
+          mkdir -p reports
           mkdir -p downloaded_sources
-
+          rm -f data/channel_index.db
 
       # ========================================================
       # RUN MANAGER
@@ -99,7 +88,6 @@ jobs:
       - name: Update playlist
         run: |
           python iptv_manager.py
-
 
       # ========================================================
       # SHOW RESULT
@@ -122,26 +110,22 @@ jobs:
             exit 1
           fi
 
-
       # ========================================================
       # COMMIT RESULT
       # ========================================================
 
       - name: Commit generated files
         run: |
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add \
-            git add output/eternal_playlist.m3u8 reports/status.txt
+          # Добавляем только готовый плейлист и отчет (без файла базы данных)
+          git add output/eternal_playlist.m3u8 reports/status.txt || git add output/eternal_playlist.m3u8
 
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
 
-          git commit \
-            -m "Auto update IPTV playlist"
-
+          git commit -m "Auto update IPTV playlist"
           git push
