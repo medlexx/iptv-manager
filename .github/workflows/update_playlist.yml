@@ -1,0 +1,215 @@
+name: Update IPTV Playlist
+
+
+# =============================================================================
+# TRIGGERS
+# =============================================================================
+
+on:
+
+  # Автоматически каждые 15 минут.
+  #
+  # Смещение на 7 минут уменьшает вероятность попадания
+  # в пик нагрузки ровно в начале часа.
+  schedule:
+
+    - cron: "7,22,37,52 * * * *"
+
+
+  # Возможность запустить вручную:
+  #
+  # GitHub
+  #   Actions
+  #       ↓
+  #   Update IPTV Playlist
+  #       ↓
+  #   Run workflow
+  workflow_dispatch:
+
+
+  # Запускать также при изменении конфигурации.
+  push:
+
+    paths:
+
+      - "spisok.txt"
+      - "config.yaml"
+      - "sources.yaml"
+      - "iptv_manager.py"
+      - "requirements.txt"
+      - ".github/workflows/update_playlist.yml"
+
+
+# =============================================================================
+# PERMISSIONS
+# =============================================================================
+
+permissions:
+
+  contents: write
+
+  pages: write
+
+  id-token: write
+
+
+# =============================================================================
+# JOB
+# =============================================================================
+
+jobs:
+
+  update-playlist:
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      # -----------------------------------------------------------------------
+      # CHECKOUT
+      # -----------------------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+        with:
+          fetch-depth: 0
+
+
+      # -----------------------------------------------------------------------
+      # PYTHON
+      # -----------------------------------------------------------------------
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+
+        with:
+          python-version: "3.12"
+
+          cache: "pip"
+
+
+      # -----------------------------------------------------------------------
+      # INSTALL DEPENDENCIES
+      # -----------------------------------------------------------------------
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+
+      # -----------------------------------------------------------------------
+      # INSTALL FFmpeg / FFprobe
+      # -----------------------------------------------------------------------
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+
+      # -----------------------------------------------------------------------
+      # RUN IPTV MANAGER
+      # -----------------------------------------------------------------------
+
+      - name: Build IPTV playlist
+        run: |
+          python iptv_manager.py
+
+
+      # -----------------------------------------------------------------------
+      # VERIFY RESULT
+      # -----------------------------------------------------------------------
+
+      - name: Verify playlist
+        run: |
+          test -f public/eternal_playlist.m3u8
+
+          echo "Playlist created successfully."
+
+          echo "Number of EXTINF entries:"
+          grep -c "^#EXTINF:" public/eternal_playlist.m3u8 || true
+
+          echo "First lines:"
+          head -20 public/eternal_playlist.m3u8
+
+
+      # -----------------------------------------------------------------------
+      # COMMIT GENERATED PLAYLIST
+      # -----------------------------------------------------------------------
+
+      - name: Commit updated playlist
+        run: |
+
+          git config user.name "github-actions[bot]"
+
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add public/eternal_playlist.m3u8
+
+          git add public/iptv_diagnostics.json || true
+
+          git add logs/iptv_manager.log || true
+
+          if git diff --cached --quiet; then
+
+            echo "No changes to commit."
+
+          else
+
+            git commit -m "Auto-update IPTV playlist"
+
+            git push
+
+          fi
+
+
+  # ===========================================================================
+  # GITHUB PAGES
+  # ===========================================================================
+
+  deploy-pages:
+
+    needs: update-playlist
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      # -----------------------------------------------------------------------
+      # CHECKOUT UPDATED REPOSITORY
+      # -----------------------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # -----------------------------------------------------------------------
+      # CONFIGURE PAGES
+      # -----------------------------------------------------------------------
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+
+      # -----------------------------------------------------------------------
+      # UPLOAD PUBLIC DIRECTORY
+      # -----------------------------------------------------------------------
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+
+        with:
+          path: "./public"
+
+
+      # -----------------------------------------------------------------------
+      # DEPLOY
+      # -----------------------------------------------------------------------
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
