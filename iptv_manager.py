@@ -1110,7 +1110,7 @@ async def resolve_channels(
 
 
 # ============================================================================
-# PLAYLIST
+# PLAYLIST AND REPORTS
 # ============================================================================
 
 def write_playlist(
@@ -1126,208 +1126,120 @@ def write_playlist(
     ]
 
     for channel in reference:
-        candidate = resolved[channel]
-        lines.append(f"#EXTINF:-1,{channel}")
-        lines.append(candidate.url)
+        candidate = resolved.get(channel)
+        if candidate:
+            lines.append(f'#EXTINF:-1 tvg-name="{channel}",{channel}')
+            lines.append(candidate.url)
 
-    atomic_write(
-        output,
-        "\n".join(lines) + "\n",
-    )
-
+    content = "\n".join(lines) + "\n"
+    atomic_write(output, content)
+    logger.info("Плейлист успешно записан в: %s", output)
     return output
 
 
-# ============================================================================
-# REPORT
-# ============================================================================
-
 def write_report(
     config: dict,
-    reference: Sequence[str],
-    candidates: Dict[str, List[Candidate]],
+    total_ref: int,
     resolved: Dict[str, Candidate],
-    missing: Sequence[str],
-) -> None:
-    path = resolve_path(config["report_file"])
+    missing: List[str],
+    playlist_updated: bool,
+) -> Path:
+    report_path = resolve_path(config["report_file"])
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
-        "IPTV MANAGER REPORT",
-        f"Required channels: {len(reference)}",
-        f"Matched channels: {len(candidates)}",
-        f"Working channels: {len(resolved)}",
-        f"Missing channels: {len(missing)}",
+        f"=== Отчет IPTV Manager ({timestamp}) ===",
+        f"Всего обязательных каналов: {total_ref}",
+        f"Успешно найдено и проверено: {len(resolved)}",
+        f"Отсутствует или не работает: {len(missing)}",
+        f"Статус обновления плейлиста: {'ОБНОВЛЕН' if playlist_updated else 'ПРОПУЩЕН (есть нерабочие каналы)'}",
         "",
     ]
 
     if missing:
-        lines.append("MISSING:")
-        lines.extend(f"- {x}" for x in missing)
+        lines.append("--- Ненайденные / нерабочие каналы ---")
+        for ch in missing:
+            lines.append(f"- {ch}")
         lines.append("")
 
-    lines.append("WORKING:")
-    for channel in reference:
-        item = resolved.get(channel)
-        if item:
-            lines.append(
-                f"- {channel} | {item.source} | "
-                f"priority={item.priority} | "
-                f"match={item.method} | "
-                f"score={item.score:.3f} | {item.url}"
-            )
+    lines.append("--- Детализация рабочих каналов ---")
+    for ch, cand in resolved.items():
+        lines.append(f"• {ch} -> {cand.source} ({cand.method}, score: {cand.score:.2f})")
 
-    atomic_write(
-        path,
-        "\n".join(lines) + "\n",
-    )
+    content = "\n".join(lines) + "\n"
+    atomic_write(report_path, content)
+    logger.info("Отчет сохранен в: %s", report_path)
+    return report_path
 
 
 # ============================================================================
-# ЗАЩИТА ОТ ОШИБКИ ```python
+# MAIN ENTRYPOINT
 # ============================================================================
 
-def check_source_file() -> None:
-    try:
-        first = Path(__file__).read_text(
-            encoding="utf-8",
-            errors="replace",
-        ).splitlines()[0].strip()
-    except Exception:
-        return
-
-    if first.startswith("```"):
-        raise RuntimeError(
-            "В iptv_manager.py попали Markdown-строки ```python/```. "
-            "Удалите их. Файл должен начинаться с #!/usr/bin/env python3."
-        )
-
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-async def async_main() -> int:
-    started = time.time()
-
-    logger.info("=" * 70)
-    logger.info("IPTV MANAGER START")
-    logger.info("=" * 70)
-
+async def main() -> None:
+    logger.info("Запуск IPTV Manager...")
     config = load_config()
 
-    reference = ReferenceParser.parse(
-        resolve_path(config["reference_file"])
-    )
+    ref_path = resolve_path(config["reference_file"])
+    reference_channels = ReferenceParser.parse(ref_path)
 
-    aliases = AliasManager(
-        resolve_path(config["aliases_file"])
-    )
+    alias_path = resolve_path(config["aliases_file"])
+    aliases = AliasManager(alias_path)
     aliases.load()
 
     matcher = ChannelMatcher(
-        reference,
+        reference_channels,
         aliases,
         float(config["fuzzy_threshold"]),
     )
 
-    db = Database(
-        resolve_path(config["database"])
-    )
+    loader = SourceLoader(config)
+    entries = await loader.load()
+
+    candidates = build_candidates(entries, matcher)
+
+    db_path = resolve_path(config["database"])
+    db = Database(db_path)
 
     try:
-        loader = SourceLoader(config)
-        entries = await loader.load()
-
-        if not entries:
-            raise RuntimeError(
-                "Не найдено ни одной записи IPTV в источниках."
-            )
-
-        candidates = build_candidates(
-            entries,
-            matcher,
-        )
-
-        validator = Validator(
-            config,
-            db,
-        )
-
+        validator = Validator(config, db)
         resolved, missing = await resolve_channels(
             config,
-            reference,
+            reference_channels,
             candidates,
             db,
             validator,
         )
 
-        logger.info(
-            "Рабочих каналов: %d/%d",
-            len(resolved),
-            len(reference),
-        )
+        strict = config.get("strict_reference", True)
+        playlist_updated = False
 
-        if config["strict_reference"] and missing:
-            sample = ", ".join(missing[:20])
-            raise RuntimeError(
-                "СТРОГИЙ РЕЖИМ: новый плейлист НЕ записан. "
-                f"Нет рабочих ссылок для {len(missing)} каналов. "
-                f"Примеры: {sample}"
+        if missing and strict:
+            logger.error(
+                "Внимание! Не найдены обязательные каналы (%d шт.): %s",
+                len(missing),
+                ", ".join(missing),
             )
-
-        if len(resolved) != len(reference):
-            raise RuntimeError(
-                "Количество каналов в результате отличается "
-                "от количества каналов в spisok.txt."
+            logger.warning(
+                "Плейлист не будет обновлен, так как включен параметр strict_reference=True."
             )
-
-        output = write_playlist(
-            config,
-            reference,
-            resolved,
-        )
+        else:
+            write_playlist(config, reference_channels, resolved)
+            playlist_updated = True
 
         write_report(
             config,
-            reference,
-            candidates,
+            len(reference_channels),
             resolved,
             missing,
+            playlist_updated,
         )
-
-        logger.info(
-            "Плейлист обновлён: %s",
-            output,
-        )
-        logger.info(
-            "Время выполнения: %.1f сек.",
-            time.time() - started,
-        )
-        logger.info("=" * 70)
-        logger.info("IPTV MANAGER FINISHED OK")
-        logger.info("=" * 70)
-
-        return 0
 
     finally:
         db.close()
 
-
-def main() -> int:
-    try:
-        check_source_file()
-        return asyncio.run(async_main())
-    except KeyboardInterrupt:
-        logger.warning("Остановлено пользователем.")
-        return 130
-    except Exception as exc:
-        logger.critical(
-            "КРИТИЧЕСКАЯ ОШИБКА: %s",
-            exc,
-            exc_info=True,
-        )
-        return 1
+    logger.info("Работа IPTV Manager завершена.")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    asyncio.run(main())
