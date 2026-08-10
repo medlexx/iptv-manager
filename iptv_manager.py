@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-IPTV Manager — production version for GitHub Actions.
+IPTV Manager — production version for GitHub Action.
 
 ВАЖНО:
 В ФАЙЛЕ iptv_manager.py ДОЛЖЕН БЫТЬ ТОЛЬКО PYTHON-КОД.
